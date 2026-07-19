@@ -1,0 +1,15 @@
+# Compiled binaries
+ha_panel
+native_touch_draw
+
+# Objects
+*.o
+src/*.o
+
+# Exclude compiled LVGL objects
+lvgl/src/**/*.o
+
+# Toolchains / temp archives
+*.tar.xz
+toolchain/
+dummy_write
