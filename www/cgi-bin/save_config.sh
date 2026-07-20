@@ -13,21 +13,18 @@ urldecode() {
     printf '%b\n' "$(echo "$1" | sed 's/+/ /g; s/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
 }
 
-# Parse parameters: ha_url=...&ha_token=...&github_token=...
+# Parse parameters: ha_url=...&ha_token=...
 HA_URL_RAW=$(echo "$POST_DATA" | grep -o 'ha_url=[^&]*' | cut -d= -f2)
 HA_TOKEN_RAW=$(echo "$POST_DATA" | grep -o 'ha_token=[^&]*' | cut -d= -f2)
-GH_TOKEN_RAW=$(echo "$POST_DATA" | grep -o 'github_token=[^&]*' | cut -d= -f2)
 
 HA_URL=$(urldecode "$HA_URL_RAW")
 HA_TOKEN=$(urldecode "$HA_TOKEN_RAW")
-GH_TOKEN=$(urldecode "$GH_TOKEN_RAW")
 
 # Save credentials as JSON config
 cat <<EOF > /tuya/data/ha_config.json
 {
   "ha_url": "$HA_URL",
-  "ha_token": "$HA_TOKEN",
-  "github_token": "$GH_TOKEN"
+  "ha_token": "$HA_TOKEN"
 }
 EOF
 

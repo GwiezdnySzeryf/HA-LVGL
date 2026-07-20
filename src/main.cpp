@@ -22,7 +22,6 @@ void hal_shutdown(void);
 // Global configuration variables
 std::string ha_url = "";
 std::string ha_token = "";
-std::string github_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
@@ -82,7 +81,6 @@ bool load_configuration() {
     
     ha_url = parse_json_value(json, "ha_url");
     ha_token = parse_json_value(json, "ha_token");
-    github_token = parse_json_value(json, "github_token");
     
     return !ha_url.empty();
 }
@@ -90,15 +88,9 @@ bool load_configuration() {
 // Perform OTA self-replacement update directly from GitHub Releases API
 bool perform_github_ota() {
     printf("[OTA] Starting OTA process...\n");
-    if (github_token.empty()) {
-        printf("[OTA] Error: GitHub token is not configured. OTA aborted.\n");
-        return false;
-    }
     
-    // 1. Fetch latest release info via secure wget command
-    // We send public/private repo query with Authorization Bearer token header
-    std::string cmd_fetch = "wget -qO- --header=\"Authorization: Bearer " + github_token + "\" "
-                            "--header=\"User-Agent: Mozilla/5.0\" "
+    // 1. Fetch latest release info via secure wget command from public repo
+    std::string cmd_fetch = "wget -qO- --header=\"User-Agent: Mozilla/5.0\" "
                             "https://api.github.com/repos/GwiezdnySzeryf/HA-LVGL/releases/latest > /tmp/latest_release.json";
     
     printf("[OTA] Querying GitHub Releases API...\n");
@@ -129,10 +121,9 @@ bool perform_github_ota() {
         return false;
     }
     
-    // 2. Download the binary asset to temporary persistent path
+    // 2. Download the binary asset from public URL
     printf("[OTA] Downloading new binary asset from %s...\n", download_url.c_str());
-    std::string cmd_download = "wget -q --header=\"Authorization: Bearer " + github_token + "\" "
-                               "--header=\"User-Agent: Mozilla/5.0\" "
+    std::string cmd_download = "wget -q --header=\"User-Agent: Mozilla/5.0\" "
                                "-O /tuya/data/ha_panel.tmp " + download_url;
                                
     int ret = system(cmd_download.c_str());
@@ -211,17 +202,12 @@ static void ota_msgbox_cb(lv_event_t * e) {
 static void info_btn_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_CLICKED) {
-        // Create a beautiful system information modal window
         static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
         
         std::string ip = get_wlan0_ip();
         std::stringstream ss;
         ss << "WERSJA: " << CURRENT_VERSION << "\nIP: " << ip;
-        if (github_token.empty()) {
-            ss << "\n(Brak Tokenu GitHub)";
-        } else {
-            ss << "\n(Token GitHub aktywny)";
-        }
+        ss << "\n(Aktualizacja z GitHub)";
         
         lv_obj_t * mbox = lv_msgbox_create(NULL, "INFO SYSTEM", ss.str().c_str(), btns, false);
         lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);

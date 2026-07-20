@@ -12,11 +12,11 @@
 
 #define WIDTH 480
 #define HEIGHT 480
-#define BYTES_PER_PIXEL 4
-#define SCREEN_SIZE (WIDTH * HEIGHT * BYTES_PER_PIXEL)
 
 static int fb_fd = -1;
-static uint32_t *fb_ptr = NULL;
+static uint8_t *fb_ptr = NULL; // Mapped as uint8_t for byte-addressing calculations
+static struct fb_var_screeninfo vinfo;
+static struct fb_fix_screeninfo finfo;
 
 static int touch_fd = -1;
 static int touch_x = 0;
@@ -37,11 +37,20 @@ extern "C" uint32_t custom_tick_get(void) {
  *======================*/
 static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
     int32_t x, y;
+    int bytes_per_pixel = vinfo.bits_per_pixel / 8;
+    
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
-            // Copy pixels from LVGL internal buffer directly to mapped framebuffer /dev/fb0
-            // lv_color_t is 32-bit (ARGB8888) when color depth is 32
-            fb_ptr[y * WIDTH + x] = color_p->full;
+            // Calculate exact hardware-aligned byte offset in mapped framebuffer memory
+            // This perfectly handles any big-endian, big-stride or double-buffering offsets (xoffset, yoffset)!
+            long int location = (x + vinfo.xoffset) * bytes_per_pixel +
+                                (y + vinfo.yoffset) * finfo.line_length;
+                                
+            if (vinfo.bits_per_pixel == 32) {
+                // lv_color_t is ARGB8888, copy directly to 32-bpp BGRA framebuffer location
+                uint32_t *pixel_dest = (uint32_t *)(fb_ptr + location);
+                *pixel_dest = color_p->full;
+            }
             color_p++;
         }
     }
@@ -57,7 +66,25 @@ bool hal_display_init(void) {
         return false;
     }
 
-    fb_ptr = (uint32_t *)mmap(NULL, SCREEN_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
+    // Retrieve variable and fixed screen parameters from Linux kernel
+    if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
+        perror("Error reading variable screen info");
+        close(fb_fd);
+        return false;
+    }
+    if (ioctl(fb_fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
+        perror("Error reading fixed screen info");
+        close(fb_fd);
+        return false;
+    }
+
+    printf("[HAL] Screen Mode: %dx%d (virtual %dx%d), bpp=%d, line_length=%d, offset=(%d,%d)\n",
+           vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
+           vinfo.bits_per_pixel, finfo.line_length, vinfo.xoffset, vinfo.yoffset);
+
+    // Map the entire allocated virtual framebuffer memory size
+    long int map_size = finfo.smem_len;
+    fb_ptr = (uint8_t *)mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fb_ptr == MAP_FAILED) {
         perror("Error mmaping framebuffer");
         close(fb_fd);
@@ -66,7 +93,6 @@ bool hal_display_init(void) {
     }
 
     // Allocate LVGL display draw buffers
-    // We allocate a buffer for 40 rows of pixels (extremely fast and saves RAM)
     static lv_disp_draw_buf_t disp_buf;
     static lv_color_t buf1[WIDTH * 40];
     lv_disp_draw_buf_init(&disp_buf, buf1, NULL, WIDTH * 40);
@@ -80,7 +106,7 @@ bool hal_display_init(void) {
     disp_drv.ver_res = HEIGHT;
     lv_disp_drv_register(&disp_drv);
 
-    printf("[HAL] Framebuffer display registered successfully. 480x480 bpp=32\n");
+    printf("[HAL] Framebuffer display registered successfully via hardware ioctl mapping.\n");
     return true;
 }
 
@@ -130,7 +156,7 @@ bool hal_touch_init(void) {
 
 void hal_shutdown(void) {
     if (fb_ptr && fb_ptr != MAP_FAILED) {
-        munmap(fb_ptr, SCREEN_SIZE);
+        munmap(fb_ptr, finfo.smem_len);
     }
     if (fb_fd >= 0) close(fb_fd);
     if (touch_fd >= 0) close(touch_fd);
