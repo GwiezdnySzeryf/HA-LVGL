@@ -2,7 +2,7 @@
 # CGI Save Config script for TPP01-Z
 # Authored by OpenCode
 
-echo "Content-Type: text/html"
+echo "Content-Type: text/html; charset=utf-8"
 echo ""
 
 # Read Content-Length bytes from stdin (POST body)

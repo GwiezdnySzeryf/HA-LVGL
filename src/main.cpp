@@ -300,20 +300,33 @@ void create_onboarding_ui(const std::string &ip) {
     lv_obj_set_style_text_color(title, lv_color_make(255, 152, 0), LV_PART_MAIN); // Orange
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
-    // 2. Description
+    // 2. Info Button "?" at Top-Right for System Settings & OTA on Onboarding screen
+    lv_obj_t * info_btn = lv_btn_create(scr);
+    lv_obj_set_size(info_btn, 45, 45);
+    lv_obj_align(info_btn, LV_ALIGN_TOP_RIGHT, -40, 40);
+    lv_obj_add_event_cb(info_btn, info_btn_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_set_style_bg_color(info_btn, lv_color_make(0x3B, 0x3B, 0x3B), LV_PART_MAIN);
+    lv_obj_set_style_radius(info_btn, 22, LV_PART_MAIN);
+
+    lv_obj_t * info_label = lv_label_create(info_btn);
+    lv_label_set_text(info_label, "?");
+    lv_obj_set_style_text_color(info_label, lv_color_make(255, 255, 255), LV_PART_MAIN);
+    lv_obj_align(info_label, LV_ALIGN_CENTER, 0, 0);
+
+    // 3. Description
     lv_obj_t * subtitle = lv_label_create(scr);
     lv_label_set_text(subtitle, "Skanuj telefonem, aby skonfigurowac:");
     lv_obj_set_style_text_color(subtitle, lv_color_make(0xAA, 0xAA, 0xAA), LV_PART_MAIN);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 65);
 
-    // 3. Generate native QR Code pointing to the web page
+    // 4. Generate native QR Code pointing to the web page
     std::string url = "http://" + ip + "/config.html";
     
     lv_obj_t * qr = lv_qrcode_create(scr, 180, lv_color_make(0, 0, 0), lv_color_make(255, 255, 255));
     lv_qrcode_update(qr, url.c_str(), url.length());
     lv_obj_align(qr, LV_ALIGN_CENTER, 0, 20);
 
-    // 4. Show raw URL / IP text at the bottom
+    // 5. Show raw URL / IP text at the bottom
     lv_obj_t * footer = lv_label_create(scr);
     lv_label_set_text(footer, url.c_str());
     lv_obj_set_style_text_color(footer, lv_color_make(255, 152, 0), LV_PART_MAIN);
