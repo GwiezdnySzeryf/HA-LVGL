@@ -14,7 +14,7 @@
 #define HEIGHT 480
 
 static int fb_fd = -1;
-static uint8_t *fb_ptr = NULL; // Mapped as uint8_t for byte-addressing calculations
+static uint8_t *fb_ptr = NULL; 
 static struct fb_var_screeninfo vinfo;
 static struct fb_fix_screeninfo finfo;
 
@@ -42,14 +42,18 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
     for (y = area->y1; y <= area->y2; y++) {
         for (x = area->x1; x <= area->x2; x++) {
             // Calculate exact hardware-aligned byte offset in mapped framebuffer memory
-            // This perfectly handles any big-endian, big-stride or double-buffering offsets (xoffset, yoffset)!
             long int location = (x + vinfo.xoffset) * bytes_per_pixel +
                                 (y + vinfo.yoffset) * finfo.line_length;
                                 
             if (vinfo.bits_per_pixel == 32) {
-                // lv_color_t is ARGB8888, copy directly to 32-bpp BGRA framebuffer location
+                // Construct 32-bit pixel word strictly matching "rgba 8/16,8/8,8/0,0/0" (XRGB8888)
+                // Red: bit 16, Green: bit 8, Blue: bit 0, Unused/Alpha: bit 24 (set to 0)
+                uint32_t raw_pixel = (color_p->ch.red << 16) | 
+                                     (color_p->ch.green << 8) | 
+                                     (color_p->ch.blue);
+                                     
                 uint32_t *pixel_dest = (uint32_t *)(fb_ptr + location);
-                *pixel_dest = color_p->full;
+                *pixel_dest = raw_pixel;
             }
             color_p++;
         }
@@ -66,7 +70,6 @@ bool hal_display_init(void) {
         return false;
     }
 
-    // Retrieve variable and fixed screen parameters from Linux kernel
     if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
         perror("Error reading variable screen info");
         close(fb_fd);
@@ -82,7 +85,6 @@ bool hal_display_init(void) {
            vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
            vinfo.bits_per_pixel, finfo.line_length, vinfo.xoffset, vinfo.yoffset);
 
-    // Map the entire allocated virtual framebuffer memory size
     long int map_size = finfo.smem_len;
     fb_ptr = (uint8_t *)mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fb_ptr == MAP_FAILED) {

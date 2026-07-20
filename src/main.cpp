@@ -230,7 +230,7 @@ void create_home_assistant_ui(void) {
     // 2. Info Button "?" at Top-Right for System Settings & OTA
     lv_obj_t * info_btn = lv_btn_create(scr);
     lv_obj_set_size(info_btn, 45, 45);
-    lv_obj_align(info_btn, LV_ALIGN_TOP_MID, 110, 50); // Positioned inside the circular screen boundaries
+    lv_obj_align(info_btn, LV_ALIGN_TOP_RIGHT, -40, 40); // Restored to top-right on square screen
     lv_obj_add_event_cb(info_btn, info_btn_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_set_style_bg_color(info_btn, lv_color_make(0x3B, 0x3B, 0x3B), LV_PART_MAIN);
     lv_obj_set_style_radius(info_btn, 22, LV_PART_MAIN); // Fully round "?" button
@@ -289,7 +289,7 @@ void create_onboarding_ui(const std::string &ip) {
     // 2. Info Button "?" at Top-Right for System Settings & OTA on Onboarding screen
     lv_obj_t * info_btn = lv_btn_create(scr);
     lv_obj_set_size(info_btn, 45, 45);
-    lv_obj_align(info_btn, LV_ALIGN_TOP_MID, 110, 50); // Positioned inside the circular screen boundaries
+    lv_obj_align(info_btn, LV_ALIGN_TOP_RIGHT, -40, 40); // Restored to top-right on square screen
     lv_obj_add_event_cb(info_btn, info_btn_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_set_style_bg_color(info_btn, lv_color_make(0x3B, 0x3B, 0x3B), LV_PART_MAIN);
     lv_obj_set_style_radius(info_btn, 22, LV_PART_MAIN);
