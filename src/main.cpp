@@ -25,7 +25,7 @@ std::string ha_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.0.0";
+const char * CURRENT_VERSION = "v1.1.0";
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
@@ -161,8 +161,7 @@ static void btn_event_cb(lv_event_t * e) {
     lv_obj_t * btn = lv_event_get_target(e);
     
     if (code == LV_EVENT_CLICKED) {
-        static bool state = false;
-        state = !state;
+        bool state = lv_obj_has_state(btn, LV_STATE_CHECKED);
         
         if (state) {
             lv_obj_set_style_bg_color(btn, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN); // Green for ON
@@ -184,14 +183,14 @@ static void ota_msgbox_cb(lv_event_t * e) {
         lv_msgbox_close(obj);
         
         // Show temporary download modal on screen
-        lv_obj_t * mbox = lv_msgbox_create(NULL, "AKTUALIZACJA", "Pobieranie nowej wersji z GitHub...", NULL, false);
+        lv_obj_t * mbox = lv_msgbox_create(NULL, "AKTUALIZACJA", "Pobieranie nowej wersji z GitHuba...", NULL, false);
         lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
         lv_timer_handler(); // Redraw immediately
         
         // Execute background OTA
         if (!perform_github_ota()) {
             lv_msgbox_close(mbox);
-            lv_msgbox_create(NULL, "BLAD", "Aktualizacja nie powiodla sie!\nSprawdz polaczenie lub Token.", NULL, true);
+            lv_msgbox_create(NULL, "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", NULL, true);
         }
     } else { // "ZAMKNIJ" (Close)
         lv_msgbox_close(obj);
@@ -206,13 +205,19 @@ static void info_btn_event_cb(lv_event_t * e) {
         
         std::string ip = get_wlan0_ip();
         std::stringstream ss;
-        ss << "WERSJA: " << CURRENT_VERSION << "\nIP: " << ip;
-        ss << "\n(Aktualizacja z GitHub)";
+        ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
+        ss << "\n\nAktualizacje: GitHub";
         
-        lv_obj_t * mbox = lv_msgbox_create(NULL, "INFO SYSTEM", ss.str().c_str(), btns, false);
+        lv_obj_t * mbox = lv_msgbox_create(NULL, "INFORMACJE", ss.str().c_str(), btns, false);
         lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_width(mbox, 360);
         lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
+        lv_obj_set_width(lv_msgbox_get_btns(mbox), 320);
+        lv_obj_set_style_pad_row(lv_msgbox_get_content(mbox), 10, LV_PART_MAIN);
     }
 }
 
@@ -253,11 +258,13 @@ void create_home_assistant_ui(void) {
     lv_obj_set_size(btn1, 220, 75);
     lv_obj_align(btn1, LV_ALIGN_CENTER, 0, 45);
     lv_obj_add_event_cb(btn1, btn_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(btn1, LV_OBJ_FLAG_CHECKABLE);
     lv_obj_set_style_bg_color(btn1, lv_color_make(0xAA, 0x00, 0x00), LV_PART_MAIN); // Initial OFF (Red)
+    lv_obj_set_style_bg_color(btn1, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_radius(btn1, 37, LV_PART_MAIN);
 
     lv_obj_t * label1 = lv_label_create(btn1);
-    lv_label_set_text(label1, "BULB / SUFIT");
+    lv_label_set_text(label1, "ŻARÓWKA / SUFIT");
     lv_obj_set_style_text_color(label1, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(label1, LV_ALIGN_CENTER, 0, 0);
 
@@ -266,11 +273,13 @@ void create_home_assistant_ui(void) {
     lv_obj_set_size(btn2, 220, 55);
     lv_obj_align(btn2, LV_ALIGN_BOTTOM_MID, 0, -45);
     lv_obj_add_event_cb(btn2, btn_event_cb, LV_EVENT_ALL, NULL);
-    lv_obj_set_style_bg_color(btn2, lv_color_make(0x3B, 0x3B, 0x3B), LV_PART_MAIN);
+    lv_obj_add_flag(btn2, LV_OBJ_FLAG_CHECKABLE);
+    lv_obj_set_style_bg_color(btn2, lv_color_make(0xAA, 0x00, 0x00), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn2, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_radius(btn2, 27, LV_PART_MAIN);
 
     lv_obj_t * label2 = lv_label_create(btn2);
-    lv_label_set_text(label2, "FAN / NAWIEW");
+    lv_label_set_text(label2, "WENTYLATOR / NAWIEW");
     lv_obj_set_style_text_color(label2, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(label2, LV_ALIGN_CENTER, 0, 0);
 }
@@ -282,7 +291,7 @@ void create_onboarding_ui(const std::string &ip) {
 
     // 1. Title
     lv_obj_t * title = lv_label_create(scr);
-    lv_label_set_text(title, "ONBOARDING");
+    lv_label_set_text(title, "KONFIGURACJA");
     lv_obj_set_style_text_color(title, lv_color_make(255, 152, 0), LV_PART_MAIN); // Orange
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 35);
 
@@ -301,7 +310,7 @@ void create_onboarding_ui(const std::string &ip) {
 
     // 3. Description
     lv_obj_t * subtitle = lv_label_create(scr);
-    lv_label_set_text(subtitle, "Skanuj telefonem, aby skonfigurowac:");
+    lv_label_set_text(subtitle, "Zeskanuj kod, aby skonfigurować");
     lv_obj_set_style_text_color(subtitle, lv_color_make(0xAA, 0xAA, 0xAA), LV_PART_MAIN);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 65);
 

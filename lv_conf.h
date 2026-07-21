@@ -79,8 +79,12 @@
 #define LV_FONT_MONTSERRAT_18 1
 #define LV_FONT_MONTSERRAT_24 1
 
-/* Set the default font */
-#define LV_FONT_DEFAULT &lv_font_montserrat_16
+/* Anti-aliasing and subpixel settings */
+#define LV_USE_FONT_SUBPX 0
+
+/* Default font extended with Polish glyphs. */
+#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(lv_font_montserrat_16_pl)
+#define LV_FONT_DEFAULT &lv_font_montserrat_16_pl
 
 /*======================
    WIDGETS CONFIGURATION
