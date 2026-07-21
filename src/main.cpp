@@ -25,7 +25,15 @@ std::string ha_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.1.0";
+const char * CURRENT_VERSION = "v1.2.0";
+
+static lv_obj_t * control_center = NULL;
+static lv_obj_t * brightness_value_label = NULL;
+static lv_obj_t * volume_value_label = NULL;
+static bool control_center_open = false;
+static int control_center_swipe_start_y = 0;
+static bool control_center_swipe_active = false;
+static int backlight_max = 255;
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
@@ -173,6 +181,16 @@ static void btn_event_cb(lv_event_t * e) {
     }
 }
 
+static void ota_update_timer_cb(lv_timer_t * timer) {
+    lv_obj_t * mbox = (lv_obj_t *)timer->user_data;
+    lv_timer_del(timer);
+
+    if (!perform_github_ota()) {
+        lv_msgbox_close(mbox);
+        lv_msgbox_create(NULL, "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", NULL, true);
+    }
+}
+
 // Event callback for the Update modal buttons
 static void ota_msgbox_cb(lv_event_t * e) {
     lv_obj_t * obj = lv_event_get_current_target(e);
@@ -185,40 +203,264 @@ static void ota_msgbox_cb(lv_event_t * e) {
         // Show temporary download modal on screen
         lv_obj_t * mbox = lv_msgbox_create(NULL, "AKTUALIZACJA", "Pobieranie nowej wersji z GitHuba...", NULL, false);
         lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
-        lv_timer_handler(); // Redraw immediately
-        
-        // Execute background OTA
-        if (!perform_github_ota()) {
-            lv_msgbox_close(mbox);
-            lv_msgbox_create(NULL, "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", NULL, true);
-        }
+        lv_timer_create(ota_update_timer_cb, 150, mbox);
     } else { // "ZAMKNIJ" (Close)
         lv_msgbox_close(obj);
     }
 }
 
+static void show_info_popup(void) {
+    static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
+
+    std::string ip = get_wlan0_ip();
+    std::stringstream ss;
+    ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
+    ss << "\n\nAktualizacje: GitHub";
+
+    lv_obj_t * mbox = lv_msgbox_create(NULL, "INFORMACJE", ss.str().c_str(), btns, false);
+    lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(mbox, 360);
+    lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
+    lv_obj_set_width(lv_msgbox_get_btns(mbox), 320);
+    lv_obj_set_style_pad_row(lv_msgbox_get_content(mbox), 10, LV_PART_MAIN);
+}
+
+static void show_info_popup_async(void * user_data) {
+    (void)user_data;
+    show_info_popup();
+}
+
 // Event callback for the Info button "?"
 static void info_btn_event_cb(lv_event_t * e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED) {
-        static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
-        
-        std::string ip = get_wlan0_ip();
-        std::stringstream ss;
-        ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
-        ss << "\n\nAktualizacje: GitHub";
-        
-        lv_obj_t * mbox = lv_msgbox_create(NULL, "INFORMACJE", ss.str().c_str(), btns, false);
-        lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
-        lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_width(mbox, 360);
-        lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
-        lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
-        lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
-        lv_obj_set_width(lv_msgbox_get_btns(mbox), 320);
-        lv_obj_set_style_pad_row(lv_msgbox_get_content(mbox), 10, LV_PART_MAIN);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) show_info_popup();
+}
+
+static int read_int_file(const char * path, int fallback) {
+    std::ifstream file(path);
+    int value = fallback;
+    if (file.is_open()) file >> value;
+    return value;
+}
+
+static void set_percent_label(lv_obj_t * label, int value) {
+    char text[16];
+    snprintf(text, sizeof(text), "%d%%", value);
+    lv_label_set_text(label, text);
+}
+
+static void brightness_event_cb(lv_event_t * e) {
+    lv_obj_t * slider = lv_event_get_target(e);
+    int percent = lv_slider_get_value(slider);
+    set_percent_label(brightness_value_label, percent);
+
+#ifndef PC_SIMULATOR
+    std::ofstream brightness("/sys/class/backlight/backlight/brightness");
+    if (brightness.is_open()) brightness << (percent * backlight_max / 100);
+#endif
+}
+
+static void apply_volume(int percent) {
+#ifndef PC_SIMULATOR
+    if (percent == 0) {
+        system("amixer -q -c 0 cset numid=43 off");
+    } else {
+        int gain = percent / 25 - 1;
+        std::stringstream command;
+        command << "amixer -q -c 0 cset numid=43 on; "
+                << "amixer -q -c 0 cset numid=34 " << gain << "; "
+                << "amixer -q -c 0 cset numid=35 " << gain;
+        system(command.str().c_str());
     }
+#else
+    (void)percent;
+#endif
+}
+
+static int normalize_volume(int percent) {
+    if (percent <= 12) return 0;
+    int normalized = ((percent + 12) / 25) * 25;
+    return normalized > 100 ? 100 : normalized;
+}
+
+static void volume_event_cb(lv_event_t * e) {
+    lv_obj_t * slider = lv_event_get_target(e);
+    int percent = lv_slider_get_value(slider);
+    set_percent_label(volume_value_label, percent);
+
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+
+    percent = normalize_volume(percent);
+    lv_slider_set_value(slider, percent, LV_ANIM_ON);
+    set_percent_label(volume_value_label, percent);
+
+    std::ofstream saved_volume("/tuya/data/ha_volume");
+    if (saved_volume.is_open()) saved_volume << percent;
+    apply_volume(percent);
+}
+
+static void control_center_anim_y(void * obj, int32_t y) {
+    lv_obj_set_y((lv_obj_t *)obj, y);
+}
+
+static void set_control_center_open(bool open) {
+    if (!control_center || control_center_open == open) return;
+    control_center_open = open;
+    lv_obj_move_foreground(control_center);
+
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, control_center);
+    lv_anim_set_exec_cb(&animation, control_center_anim_y);
+    lv_anim_set_values(&animation, lv_obj_get_y(control_center), open ? 0 : -390);
+    lv_anim_set_time(&animation, 260);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_start(&animation);
+}
+
+static void top_edge_event_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_point_t point;
+
+    if (code == LV_EVENT_PRESSED) {
+        lv_indev_get_point(lv_indev_get_act(), &point);
+        control_center_swipe_start_y = point.y;
+        control_center_swipe_active = true;
+    } else if (code == LV_EVENT_PRESSING && control_center_swipe_active) {
+        lv_indev_get_point(lv_indev_get_act(), &point);
+        if (point.y - control_center_swipe_start_y < 60) return;
+        control_center_swipe_active = false;
+        set_control_center_open(true);
+        lv_indev_wait_release(lv_indev_get_act());
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        control_center_swipe_active = false;
+    }
+}
+
+static void control_center_event_cb(lv_event_t * e) {
+    if (!control_center_open) return;
+    if (lv_event_get_code(e) == LV_EVENT_GESTURE &&
+        lv_indev_get_gesture_dir(lv_indev_get_act()) == LV_DIR_TOP) {
+        set_control_center_open(false);
+        lv_indev_wait_release(lv_indev_get_act());
+    }
+}
+
+static void close_control_center_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) set_control_center_open(false);
+}
+
+static void settings_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    set_control_center_open(false);
+    lv_async_call(show_info_popup_async, NULL);
+}
+
+static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * title,
+                                        int y, int min_value, int value, lv_event_cb_t callback,
+                                        lv_obj_t ** value_label) {
+    lv_obj_t * label = lv_label_create(parent);
+    lv_label_set_text(label, title);
+    lv_obj_set_style_text_color(label, lv_color_make(0xD5, 0xD8, 0xE2), LV_PART_MAIN);
+    lv_obj_set_pos(label, 42, y);
+
+    *value_label = lv_label_create(parent);
+    set_percent_label(*value_label, value);
+    lv_obj_set_style_text_color(*value_label, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+    lv_obj_align(*value_label, LV_ALIGN_TOP_RIGHT, -42, y);
+
+    lv_obj_t * slider = lv_slider_create(parent);
+    lv_obj_set_size(slider, 396, 20);
+    lv_obj_set_pos(slider, 42, y + 32);
+    lv_slider_set_range(slider, min_value, 100);
+    lv_slider_set_value(slider, value, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(slider, lv_color_make(0x4A, 0x4E, 0x59), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 2, LV_PART_KNOB);
+    lv_obj_add_event_cb(slider, callback, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(slider, callback, LV_EVENT_RELEASED, NULL);
+    return slider;
+}
+
+static void create_control_center(lv_obj_t * scr) {
+    control_center_open = false;
+
+    lv_obj_t * edge = lv_obj_create(scr);
+    lv_obj_set_size(edge, 480, 30);
+    lv_obj_align(edge, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(edge, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(edge, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(edge, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(edge, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(edge, top_edge_event_cb, LV_EVENT_ALL, NULL);
+
+    control_center = lv_obj_create(scr);
+    lv_obj_set_size(control_center, 480, 390);
+    lv_obj_set_pos(control_center, 0, -390);
+    lv_obj_set_style_bg_color(control_center, lv_color_make(0x24, 0x27, 0x30), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(control_center, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(control_center, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(control_center, 28, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(control_center, 35, LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(control_center, LV_OPA_50, LV_PART_MAIN);
+    lv_obj_clear_flag(control_center, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_event_cb(scr, control_center_event_cb);
+    lv_obj_add_event_cb(scr, control_center_event_cb, LV_EVENT_GESTURE, NULL);
+
+    lv_obj_t * title = lv_label_create(control_center);
+    lv_label_set_text(title, "CENTRUM STEROWANIA");
+    lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 26, 18);
+
+    lv_obj_t * version = lv_label_create(control_center);
+    lv_label_set_text(version, CURRENT_VERSION);
+    lv_obj_set_style_text_color(version, lv_color_make(0x7F, 0x85, 0x93), LV_PART_MAIN);
+    lv_obj_align(version, LV_ALIGN_TOP_RIGHT, -26, 18);
+
+    backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
+    if (backlight_max < 1) backlight_max = 255;
+    int brightness_raw = read_int_file("/sys/class/backlight/backlight/brightness", backlight_max * 4 / 5);
+    int brightness = brightness_raw * 100 / backlight_max;
+    if (brightness < 5) brightness = 5;
+    if (brightness > 100) brightness = 100;
+#ifndef PC_SIMULATOR
+    if (brightness_raw != brightness * backlight_max / 100) {
+        std::ofstream brightness_file("/sys/class/backlight/backlight/brightness");
+        if (brightness_file.is_open()) brightness_file << (brightness * backlight_max / 100);
+    }
+#endif
+    create_control_slider(control_center, "JASNOŚĆ", 72, 5, brightness,
+                          brightness_event_cb, &brightness_value_label);
+
+    int volume = normalize_volume(read_int_file("/tuya/data/ha_volume", 50));
+    create_control_slider(control_center, "GŁOŚNOŚĆ", 160, 0, volume,
+                          volume_event_cb, &volume_value_label);
+    apply_volume(volume);
+
+    lv_obj_t * settings = lv_btn_create(control_center);
+    lv_obj_set_size(settings, 396, 58);
+    lv_obj_set_pos(settings, 42, 256);
+    lv_obj_set_style_bg_color(settings, lv_color_make(0x36, 0x3A, 0x45), LV_PART_MAIN);
+    lv_obj_set_style_radius(settings, 18, LV_PART_MAIN);
+    lv_obj_add_event_cb(settings, settings_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * settings_label = lv_label_create(settings);
+    lv_label_set_text(settings_label, "USTAWIENIA");
+    lv_obj_set_style_text_color(settings_label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(settings_label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * handle = lv_btn_create(control_center);
+    lv_obj_set_size(handle, 72, 22);
+    lv_obj_align(handle, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_set_style_bg_color(handle, lv_color_make(0x69, 0x6E, 0x7A), LV_PART_MAIN);
+    lv_obj_set_style_radius(handle, 11, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(handle, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(handle, close_control_center_cb, LV_EVENT_CLICKED, NULL);
 }
 
 // Create the active HA dashboard UI
@@ -282,6 +524,8 @@ void create_home_assistant_ui(void) {
     lv_label_set_text(label2, "WENTYLATOR / NAWIEW");
     lv_obj_set_style_text_color(label2, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(label2, LV_ALIGN_CENTER, 0, 0);
+
+    create_control_center(scr);
 }
 
 // Create the onboarding UI with native QR code
@@ -326,6 +570,8 @@ void create_onboarding_ui(const std::string &ip) {
     lv_label_set_text(footer, url.c_str());
     lv_obj_set_style_text_color(footer, lv_color_make(255, 152, 0), LV_PART_MAIN);
     lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -50);
+
+    create_control_center(scr);
 }
 
 // Periodical timer check to see if config file has been saved
