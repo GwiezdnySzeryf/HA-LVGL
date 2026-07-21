@@ -25,7 +25,7 @@ std::string ha_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.3.0";
+const char * CURRENT_VERSION = "v1.4.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -33,6 +33,9 @@ static lv_obj_t * volume_value_label = NULL;
 static int control_center_drag_start_y = 0;
 static int control_center_drag_start_panel_y = -480;
 static bool control_center_drag_active = false;
+static int control_center_drag_last_y = 0;
+static uint32_t control_center_drag_last_time = 0;
+static int control_center_drag_velocity = 0;
 static int backlight_max = 255;
 
 // Declare external native image data
@@ -296,6 +299,31 @@ static void volume_event_cb(lv_event_t * e) {
     apply_volume(percent);
 }
 
+static void control_center_anim_y(void * obj, int32_t y) {
+    lv_obj_set_y((lv_obj_t *)obj, y);
+}
+
+static void snap_control_center(void) {
+    int current_y = lv_obj_get_y(control_center);
+    int target_y;
+
+    if (control_center_drag_velocity > 700) target_y = 0;
+    else if (control_center_drag_velocity < -700) target_y = -480;
+    else target_y = current_y >= -240 ? 0 : -480;
+
+    int distance = abs(target_y - current_y);
+    if (distance == 0) return;
+
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, control_center);
+    lv_anim_set_exec_cb(&animation, control_center_anim_y);
+    lv_anim_set_values(&animation, current_y, target_y);
+    lv_anim_set_time(&animation, 120 + distance * 180 / 480);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_start(&animation);
+}
+
 static void control_center_drag_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_point_t point;
@@ -304,10 +332,22 @@ static void control_center_drag_event_cb(lv_event_t * e) {
         lv_indev_get_point(lv_indev_get_act(), &point);
         control_center_drag_start_y = point.y;
         control_center_drag_start_panel_y = lv_obj_get_y(control_center);
+        control_center_drag_last_y = point.y;
+        control_center_drag_last_time = custom_tick_get();
+        control_center_drag_velocity = 0;
         control_center_drag_active = true;
+        lv_anim_del(control_center, control_center_anim_y);
         lv_obj_move_foreground(control_center);
     } else if (code == LV_EVENT_PRESSING && control_center_drag_active) {
         lv_indev_get_point(lv_indev_get_act(), &point);
+        uint32_t now = custom_tick_get();
+        int delta_y = point.y - control_center_drag_last_y;
+        uint32_t delta_time = now - control_center_drag_last_time;
+        if (delta_y != 0 && delta_time > 0) {
+            control_center_drag_velocity = delta_y * 1000 / (int)delta_time;
+            control_center_drag_last_y = point.y;
+            control_center_drag_last_time = now;
+        }
         int y = control_center_drag_start_panel_y + point.y - control_center_drag_start_y;
         if (y < -480) y = -480;
         if (y > 0) y = 0;
@@ -316,6 +356,7 @@ static void control_center_drag_event_cb(lv_event_t * e) {
         lv_obj_set_y(control_center, y);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         control_center_drag_active = false;
+        snap_control_center();
     }
 }
 
