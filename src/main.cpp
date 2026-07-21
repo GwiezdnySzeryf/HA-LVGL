@@ -25,7 +25,7 @@ std::string ha_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.4.0";
+const char * CURRENT_VERSION = "v1.5.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -37,6 +37,7 @@ static int control_center_drag_last_y = 0;
 static uint32_t control_center_drag_last_time = 0;
 static int control_center_drag_velocity = 0;
 static int backlight_max = 255;
+static lv_obj_t * settings_screen = NULL;
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
@@ -45,6 +46,19 @@ LV_FONT_DECLARE(lv_font_control_icons_24);
 #define ICON_BRIGHTNESS "\xEF\x86\x85"
 #define ICON_VOLUME     "\xEF\x80\xA8"
 #define ICON_SETTINGS   "\xEF\x80\x93"
+#define ICON_HOME       "\xEF\x80\x95"
+#define ICON_DOWNLOAD   "\xEF\x80\x99"
+#define ICON_CHEVRON    "\xEF\x81\x94"
+#define ICON_BACK       "\xEF\x81\xA0"
+#define ICON_GLOBE      "\xEF\x82\xAC"
+#define ICON_TOOLS      "\xEF\x82\xAD"
+#define ICON_DISPLAY    "\xEF\x84\x88"
+#define ICON_INFO       "\xEF\x84\xA9"
+#define ICON_MIC        "\xEF\x84\xB0"
+#define ICON_PLUG       "\xEF\x87\xA6"
+#define ICON_WIFI       "\xEF\x87\xAB"
+#define ICON_BLUETOOTH  "\xEF\x8A\x93"
+#define ICON_PALETTE    "\xEF\x94\xBF"
 
 // Helper function to get wlan0 IP address dynamically
 std::string get_wlan0_ip() {
@@ -237,14 +251,216 @@ static void show_info_popup(void) {
     lv_obj_set_style_pad_row(lv_msgbox_get_content(mbox), 10, LV_PART_MAIN);
 }
 
-static void show_info_popup_async(void * user_data) {
-    (void)user_data;
-    show_info_popup();
-}
-
 // Event callback for the Info button "?"
 static void info_btn_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) show_info_popup();
+}
+
+enum settings_action_t {
+    SETTINGS_ACTION_NONE = 0,
+    SETTINGS_ACTION_CONTROLS,
+    SETTINGS_ACTION_DIAGNOSTICS,
+    SETTINGS_ACTION_INFO
+};
+
+static void close_settings(void) {
+    if (!settings_screen) return;
+    lv_obj_del_async(settings_screen);
+    settings_screen = NULL;
+}
+
+static void settings_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_settings();
+}
+
+static void diagnostics_msgbox_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        lv_msgbox_close(lv_event_get_current_target(e));
+    }
+}
+
+static void show_diagnostics_popup(void) {
+    static const char * buttons[] = {"ZAMKNIJ", ""};
+    std::string ip = get_wlan0_ip();
+    std::stringstream ss;
+    ss << "Aplikacja: aktywna\nSieć: ";
+    ss << (ip == "127.0.0.1" ? "brak połączenia" : ip);
+    ss << "\nHome Assistant: ";
+    ss << (config_exists() ? "skonfigurowany" : "nieskonfigurowany");
+
+    lv_obj_t * mbox = lv_msgbox_create(NULL, "DIAGNOSTYKA", ss.str().c_str(), buttons, false);
+    lv_obj_add_event_cb(mbox, diagnostics_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(mbox, 360);
+    lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
+}
+
+static void settings_card_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    settings_action_t action = (settings_action_t)(long)lv_event_get_user_data(e);
+
+    if (action == SETTINGS_ACTION_CONTROLS) {
+        close_settings();
+        lv_obj_set_y(control_center, 0);
+    } else if (action == SETTINGS_ACTION_DIAGNOSTICS) {
+        show_diagnostics_popup();
+    } else if (action == SETTINGS_ACTION_INFO) {
+        show_info_popup();
+    }
+}
+
+static void add_settings_section(lv_obj_t * list, const char * title, int * y) {
+    lv_obj_t * label = lv_label_create(list);
+    lv_label_set_text(label, title);
+    lv_obj_set_pos(label, 32, *y + 6);
+    lv_obj_set_style_text_color(label, lv_color_make(0x8A, 0xC7, 0xFA), LV_PART_MAIN);
+    *y += 38;
+}
+
+static void add_settings_card(lv_obj_t * list, int * y, const char * icon_symbol,
+                              lv_color_t icon_color, const char * title,
+                              const char * subtitle, settings_action_t action) {
+    lv_obj_t * card = lv_obj_create(list);
+    lv_obj_set_size(card, 424, 78);
+    lv_obj_set_pos(card, 28, *y);
+    lv_obj_set_style_bg_color(card, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(card, lv_color_make(0x2A, 0x2E, 0x38), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(card, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * icon_bg = lv_obj_create(card);
+    lv_obj_set_size(icon_bg, 48, 48);
+    lv_obj_set_pos(icon_bg, 14, 15);
+    lv_obj_set_style_bg_color(icon_bg, icon_color, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon_bg, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(icon_bg, 24, LV_PART_MAIN);
+    lv_obj_clear_flag(icon_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t * icon = lv_label_create(icon_bg);
+    lv_label_set_text(icon, icon_symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(icon, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_pos(title_label, 78, 13);
+    lv_obj_set_style_text_color(title_label, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
+
+    lv_obj_t * subtitle_label = lv_label_create(card);
+    lv_label_set_text(subtitle_label, subtitle);
+    lv_obj_set_pos(subtitle_label, 78, 43);
+    lv_obj_set_style_text_color(subtitle_label, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+
+    if (action != SETTINGS_ACTION_NONE) {
+        lv_obj_t * chevron = lv_label_create(card);
+        lv_label_set_text(chevron, ICON_CHEVRON);
+        lv_obj_set_style_text_font(chevron, &lv_font_control_icons_24, LV_PART_MAIN);
+        lv_obj_set_style_text_color(chevron, lv_color_make(0x8F, 0x8D, 0x98), LV_PART_MAIN);
+        lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -18, 0);
+        lv_obj_add_event_cb(card, settings_card_event_cb, LV_EVENT_CLICKED, (void *)(long)action);
+    } else {
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    *y += 88;
+}
+
+static void create_settings_screen(void) {
+    if (settings_screen) return;
+
+    settings_screen = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(settings_screen, 480, 480);
+    lv_obj_set_pos(settings_screen, 0, 0);
+    lv_obj_set_style_bg_color(settings_screen, lv_color_make(0x11, 0x13, 0x18), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(settings_screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(settings_screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(settings_screen, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(settings_screen, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(settings_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * back = lv_btn_create(settings_screen);
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_pos(back, 12, 11);
+    lv_obj_set_style_bg_color(back, lv_color_make(0x2A, 0x2D, 0x35), LV_PART_MAIN);
+    lv_obj_set_style_radius(back, 24, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(back, settings_back_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * back_icon = lv_label_create(back);
+    lv_label_set_text(back_icon, ICON_BACK);
+    lv_obj_set_style_text_font(back_icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(back_icon, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(back_icon, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * heading = lv_label_create(settings_screen);
+    lv_label_set_text(heading, "Ustawienia");
+    lv_obj_set_pos(heading, 76, 22);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(heading, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
+
+    lv_obj_t * list = lv_obj_create(settings_screen);
+    lv_obj_set_size(list, 480, 410);
+    lv_obj_set_pos(list, 0, 70);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    int y = 8;
+    std::string ip = get_wlan0_ip();
+    std::string wifi_status = ip == "127.0.0.1" ? "Brak połączenia" : "Połączono - " + ip;
+    std::string ha_status = config_exists() ? "Skonfigurowano" : "Wymaga konfiguracji";
+
+    add_settings_section(list, "ŁĄCZNOŚĆ", &y);
+    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x18, 0x65, 0xA8),
+                      "Wi-Fi", wifi_status.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_BLUETOOTH, lv_color_make(0x4F, 0x5D, 0xB8),
+                      "Bluetooth Proxy", "Planowane", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_PLUG, lv_color_make(0x38, 0x6A, 0x20),
+                      "Zigbee Router", "Planowane", SETTINGS_ACTION_NONE);
+
+    add_settings_section(list, "PANEL", &y);
+    add_settings_card(list, &y, ICON_BRIGHTNESS, lv_color_make(0x9A, 0x56, 0x00),
+                      "Ekran", "Jasność i wygaszanie", SETTINGS_ACTION_CONTROLS);
+    add_settings_card(list, &y, ICON_VOLUME, lv_color_make(0x7A, 0x48, 0x92),
+                      "Dźwięk", "Głośność i mikrofon", SETTINGS_ACTION_CONTROLS);
+    add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),
+                      "Wygląd", "Motyw i ekran główny - planowane", SETTINGS_ACTION_NONE);
+
+    add_settings_section(list, "HOME ASSISTANT", &y);
+    add_settings_card(list, &y, ICON_HOME, lv_color_make(0x03, 0x78, 0xA6),
+                      "Połączenie", ha_status.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
+                      "Portal WWW", "Planowane", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
+                      "Asystent głosowy", "HA Assist / Wyoming - planowane", SETTINGS_ACTION_NONE);
+
+    add_settings_section(list, "SYSTEM", &y);
+    add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
+                      "Aktualizacje", CURRENT_VERSION, SETTINGS_ACTION_INFO);
+    add_settings_card(list, &y, ICON_TOOLS, lv_color_make(0x5C, 0x60, 0x6A),
+                      "Diagnostyka", "Stan urządzenia", SETTINGS_ACTION_DIAGNOSTICS);
+    add_settings_card(list, &y, ICON_INFO, lv_color_make(0x18, 0x65, 0xA8),
+                      "Informacje", "Panel TPP01-Z", SETTINGS_ACTION_INFO);
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, y);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
+
+static void create_settings_screen_async(void * user_data) {
+    (void)user_data;
+    create_settings_screen();
 }
 
 static int read_int_file(const char * path, int fallback) {
@@ -363,7 +579,7 @@ static void control_center_drag_event_cb(lv_event_t * e) {
 static void settings_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     lv_obj_set_y(control_center, -480);
-    lv_async_call(show_info_popup_async, NULL);
+    lv_async_call(create_settings_screen_async, NULL);
 }
 
 static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * icon_symbol,
@@ -439,7 +655,7 @@ static void create_control_center(lv_obj_t * scr) {
     lv_obj_align(settings_icon, LV_ALIGN_CENTER, 0, 0);
 
     lv_obj_t * handle_zone = lv_obj_create(control_center);
-    lv_obj_set_size(handle_zone, 480, 40);
+    lv_obj_set_size(handle_zone, 480, 64);
     lv_obj_align(handle_zone, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(handle_zone, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(handle_zone, 0, LV_PART_MAIN);
@@ -587,6 +803,7 @@ static void config_poll_timer(lv_timer_t * timer) {
         // 2. Delete timer and load main UI
         lv_timer_del(timer);
         onboarding_active = false;
+        close_settings();
         create_home_assistant_ui();
     }
 }
