@@ -28,6 +28,23 @@ OBJS = $(COBJS) $(CXXOBJS)
 # 3. Compilation Rules
 all: $(BIN)
 
+# Local PC Simulator target (x86_64)
+# We compile C files using gcc and C++ files using g++ to prevent C++ type casting errors
+pc:
+	@echo "[COMPILE FOR PC SIMULATOR]"
+	@for f in $(CSRCS); do \
+		echo "[CC_PC] $$f"; \
+		gcc -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -c $$f -o $${f%.c}.o || exit 1; \
+	done
+	@echo "[CXX_PC] src/hal.cpp"
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/hal.cpp -o src/hal.o
+	@echo "[CXX_PC] src/ha_logo.cpp"
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/ha_logo.cpp -o src/ha_logo.o
+	@echo "[CXX_PC] src/main.cpp"
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/main.cpp -o src/main.o
+	@echo "[LINK_PC] ha_panel_pc"
+	g++ src/hal.o src/ha_logo.o src/main.o $(COBJS) -lSDL2 -o ha_panel_pc
+
 $(BIN): $(OBJS)
 	@echo "[LINK] $@"
 	$(CXX) $(CXXFLAGS) $(OBJS) -o $(BIN)
@@ -41,4 +58,4 @@ $(BIN): $(OBJS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(BIN)
+	rm -f $(OBJS) $(BIN) ha_panel_pc
