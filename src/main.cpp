@@ -25,18 +25,23 @@ std::string ha_token = "";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.2.0";
+const char * CURRENT_VERSION = "v1.3.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
 static lv_obj_t * volume_value_label = NULL;
-static bool control_center_open = false;
-static int control_center_swipe_start_y = 0;
-static bool control_center_swipe_active = false;
+static int control_center_drag_start_y = 0;
+static int control_center_drag_start_panel_y = -480;
+static bool control_center_drag_active = false;
 static int backlight_max = 255;
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
+LV_FONT_DECLARE(lv_font_control_icons_24);
+
+#define ICON_BRIGHTNESS "\xEF\x86\x85"
+#define ICON_VOLUME     "\xEF\x80\xA8"
+#define ICON_SETTINGS   "\xEF\x80\x93"
 
 // Helper function to get wlan0 IP address dynamically
 std::string get_wlan0_ip() {
@@ -268,22 +273,14 @@ static void apply_volume(int percent) {
     if (percent == 0) {
         system("amixer -q -c 0 cset numid=43 off");
     } else {
-        int gain = percent / 25 - 1;
-        std::stringstream command;
-        command << "amixer -q -c 0 cset numid=43 on; "
-                << "amixer -q -c 0 cset numid=34 " << gain << "; "
-                << "amixer -q -c 0 cset numid=35 " << gain;
-        system(command.str().c_str());
+        // The OEM app also keeps DAC gain fixed and applies 0-100% in software playback.
+        system("amixer -q -c 0 cset numid=43 on; "
+               "amixer -q -c 0 cset numid=34 2; "
+               "amixer -q -c 0 cset numid=35 2");
     }
 #else
     (void)percent;
 #endif
-}
-
-static int normalize_volume(int percent) {
-    if (percent <= 12) return 0;
-    int normalized = ((percent + 12) / 25) * 25;
-    return normalized > 100 ? 100 : normalized;
 }
 
 static void volume_event_cb(lv_event_t * e) {
@@ -294,79 +291,48 @@ static void volume_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
 
-    percent = normalize_volume(percent);
-    lv_slider_set_value(slider, percent, LV_ANIM_ON);
-    set_percent_label(volume_value_label, percent);
-
     std::ofstream saved_volume("/tuya/data/ha_volume");
     if (saved_volume.is_open()) saved_volume << percent;
     apply_volume(percent);
 }
 
-static void control_center_anim_y(void * obj, int32_t y) {
-    lv_obj_set_y((lv_obj_t *)obj, y);
-}
-
-static void set_control_center_open(bool open) {
-    if (!control_center || control_center_open == open) return;
-    control_center_open = open;
-    lv_obj_move_foreground(control_center);
-
-    lv_anim_t animation;
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, control_center);
-    lv_anim_set_exec_cb(&animation, control_center_anim_y);
-    lv_anim_set_values(&animation, lv_obj_get_y(control_center), open ? 0 : -390);
-    lv_anim_set_time(&animation, 260);
-    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
-    lv_anim_start(&animation);
-}
-
-static void top_edge_event_cb(lv_event_t * e) {
+static void control_center_drag_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_point_t point;
 
     if (code == LV_EVENT_PRESSED) {
         lv_indev_get_point(lv_indev_get_act(), &point);
-        control_center_swipe_start_y = point.y;
-        control_center_swipe_active = true;
-    } else if (code == LV_EVENT_PRESSING && control_center_swipe_active) {
+        control_center_drag_start_y = point.y;
+        control_center_drag_start_panel_y = lv_obj_get_y(control_center);
+        control_center_drag_active = true;
+        lv_obj_move_foreground(control_center);
+    } else if (code == LV_EVENT_PRESSING && control_center_drag_active) {
         lv_indev_get_point(lv_indev_get_act(), &point);
-        if (point.y - control_center_swipe_start_y < 60) return;
-        control_center_swipe_active = false;
-        set_control_center_open(true);
-        lv_indev_wait_release(lv_indev_get_act());
+        int y = control_center_drag_start_panel_y + point.y - control_center_drag_start_y;
+        if (y < -480) y = -480;
+        if (y > 0) y = 0;
+        if (y < -472) y = -480;
+        if (y > -8) y = 0;
+        lv_obj_set_y(control_center, y);
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        control_center_swipe_active = false;
+        control_center_drag_active = false;
     }
-}
-
-static void control_center_event_cb(lv_event_t * e) {
-    if (!control_center_open) return;
-    if (lv_event_get_code(e) == LV_EVENT_GESTURE &&
-        lv_indev_get_gesture_dir(lv_indev_get_act()) == LV_DIR_TOP) {
-        set_control_center_open(false);
-        lv_indev_wait_release(lv_indev_get_act());
-    }
-}
-
-static void close_control_center_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) set_control_center_open(false);
 }
 
 static void settings_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    set_control_center_open(false);
+    lv_obj_set_y(control_center, -480);
     lv_async_call(show_info_popup_async, NULL);
 }
 
-static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * title,
+static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * icon_symbol,
                                         int y, int min_value, int value, lv_event_cb_t callback,
                                         lv_obj_t ** value_label) {
-    lv_obj_t * label = lv_label_create(parent);
-    lv_label_set_text(label, title);
-    lv_obj_set_style_text_color(label, lv_color_make(0xD5, 0xD8, 0xE2), LV_PART_MAIN);
-    lv_obj_set_pos(label, 42, y);
+    lv_obj_t * icon = lv_label_create(parent);
+    lv_label_set_text(icon, icon_symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_make(0xD5, 0xD8, 0xE2), LV_PART_MAIN);
+    lv_obj_set_pos(icon, 42, y);
 
     *value_label = lv_label_create(parent);
     set_percent_label(*value_label, value);
@@ -375,7 +341,7 @@ static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * title,
 
     lv_obj_t * slider = lv_slider_create(parent);
     lv_obj_set_size(slider, 396, 20);
-    lv_obj_set_pos(slider, 42, y + 32);
+    lv_obj_set_pos(slider, 42, y + 42);
     lv_slider_set_range(slider, min_value, 100);
     lv_slider_set_value(slider, value, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(slider, lv_color_make(0x4A, 0x4E, 0x59), LV_PART_MAIN);
@@ -388,39 +354,14 @@ static lv_obj_t * create_control_slider(lv_obj_t * parent, const char * title,
 }
 
 static void create_control_center(lv_obj_t * scr) {
-    control_center_open = false;
-
-    lv_obj_t * edge = lv_obj_create(scr);
-    lv_obj_set_size(edge, 480, 30);
-    lv_obj_align(edge, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_opa(edge, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(edge, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(edge, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(edge, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(edge, top_edge_event_cb, LV_EVENT_ALL, NULL);
-
     control_center = lv_obj_create(scr);
-    lv_obj_set_size(control_center, 480, 390);
-    lv_obj_set_pos(control_center, 0, -390);
+    lv_obj_set_size(control_center, 480, 480);
+    lv_obj_set_pos(control_center, 0, -480);
     lv_obj_set_style_bg_color(control_center, lv_color_make(0x24, 0x27, 0x30), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(control_center, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(control_center, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(control_center, 28, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(control_center, 35, LV_PART_MAIN);
-    lv_obj_set_style_shadow_opa(control_center, LV_OPA_50, LV_PART_MAIN);
+    lv_obj_set_style_radius(control_center, 0, LV_PART_MAIN);
     lv_obj_clear_flag(control_center, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_event_cb(scr, control_center_event_cb);
-    lv_obj_add_event_cb(scr, control_center_event_cb, LV_EVENT_GESTURE, NULL);
-
-    lv_obj_t * title = lv_label_create(control_center);
-    lv_label_set_text(title, "CENTRUM STEROWANIA");
-    lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 26, 18);
-
-    lv_obj_t * version = lv_label_create(control_center);
-    lv_label_set_text(version, CURRENT_VERSION);
-    lv_obj_set_style_text_color(version, lv_color_make(0x7F, 0x85, 0x93), LV_PART_MAIN);
-    lv_obj_align(version, LV_ALIGN_TOP_RIGHT, -26, 18);
 
     backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
     if (backlight_max < 1) backlight_max = 255;
@@ -434,33 +375,53 @@ static void create_control_center(lv_obj_t * scr) {
         if (brightness_file.is_open()) brightness_file << (brightness * backlight_max / 100);
     }
 #endif
-    create_control_slider(control_center, "JASNOŚĆ", 72, 5, brightness,
+    create_control_slider(control_center, ICON_BRIGHTNESS, 88, 5, brightness,
                           brightness_event_cb, &brightness_value_label);
 
-    int volume = normalize_volume(read_int_file("/tuya/data/ha_volume", 50));
-    create_control_slider(control_center, "GŁOŚNOŚĆ", 160, 0, volume,
+    int volume = read_int_file("/tuya/data/ha_volume", 80);
+    if (volume < 0 || volume > 100) volume = 80;
+    create_control_slider(control_center, ICON_VOLUME, 202, 0, volume,
                           volume_event_cb, &volume_value_label);
     apply_volume(volume);
 
     lv_obj_t * settings = lv_btn_create(control_center);
-    lv_obj_set_size(settings, 396, 58);
-    lv_obj_set_pos(settings, 42, 256);
+    lv_obj_set_size(settings, 76, 76);
+    lv_obj_align(settings, LV_ALIGN_TOP_MID, 0, 322);
     lv_obj_set_style_bg_color(settings, lv_color_make(0x36, 0x3A, 0x45), LV_PART_MAIN);
-    lv_obj_set_style_radius(settings, 18, LV_PART_MAIN);
+    lv_obj_set_style_radius(settings, 38, LV_PART_MAIN);
     lv_obj_add_event_cb(settings, settings_event_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t * settings_label = lv_label_create(settings);
-    lv_label_set_text(settings_label, "USTAWIENIA");
-    lv_obj_set_style_text_color(settings_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_align(settings_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t * settings_icon = lv_label_create(settings);
+    lv_label_set_text(settings_icon, ICON_SETTINGS);
+    lv_obj_set_style_text_font(settings_icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(settings_icon, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(settings_icon, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t * handle = lv_btn_create(control_center);
-    lv_obj_set_size(handle, 72, 22);
-    lv_obj_align(handle, LV_ALIGN_BOTTOM_MID, 0, -12);
-    lv_obj_set_style_bg_color(handle, lv_color_make(0x69, 0x6E, 0x7A), LV_PART_MAIN);
-    lv_obj_set_style_radius(handle, 11, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(handle, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(handle, close_control_center_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * handle_zone = lv_obj_create(control_center);
+    lv_obj_set_size(handle_zone, 480, 40);
+    lv_obj_align(handle_zone, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_opa(handle_zone, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(handle_zone, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(handle_zone, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(handle_zone, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(handle_zone, control_center_drag_event_cb, LV_EVENT_ALL, NULL);
+
+    lv_obj_t * handle = lv_obj_create(handle_zone);
+    lv_obj_set_size(handle, 72, 8);
+    lv_obj_align(handle, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(handle, lv_color_make(0x79, 0x7E, 0x89), LV_PART_MAIN);
+    lv_obj_set_style_border_width(handle, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(handle, 4, LV_PART_MAIN);
+    lv_obj_clear_flag(handle, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t * edge = lv_obj_create(scr);
+    lv_obj_set_size(edge, 480, 30);
+    lv_obj_align(edge, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(edge, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(edge, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(edge, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(edge, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(edge, control_center_drag_event_cb, LV_EVENT_ALL, NULL);
 }
 
 // Create the active HA dashboard UI

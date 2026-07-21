@@ -18,6 +18,7 @@ BIN = ha_panel
 # Automatically find all C files in LVGL source tree
 CSRCS += $(shell find -L ./lvgl/src -name "*.c")
 CSRCS += src/lv_font_montserrat_16_pl.c
+CSRCS += src/lv_font_control_icons_24.c
 
 # Add your custom sources
 CXXSRCS += src/hal.cpp src/ha_logo.cpp src/main.cpp
