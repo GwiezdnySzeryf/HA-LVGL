@@ -216,7 +216,7 @@ static void ota_update_timer_cb(lv_timer_t * timer) {
     if (!perform_github_ota()) {
         lv_msgbox_close(mbox);
         static const char * err_btns[] = {"ZAMKNIJ", ""};
-        lv_obj_t * err_mbox = lv_msgbox_create(lv_layer_top(), "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", err_btns, true);
+        lv_obj_t * err_mbox = lv_msgbox_create(lv_layer_top(), "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", err_btns, false);
         lv_obj_add_event_cb(err_mbox, msgbox_close_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_align(err_mbox, LV_ALIGN_CENTER, 0, 0);
         lv_obj_set_width(err_mbox, 360);
@@ -224,17 +224,6 @@ static void ota_update_timer_cb(lv_timer_t * timer) {
         lv_obj_set_style_text_color(lv_msgbox_get_title(err_mbox), lv_color_make(0xF4, 0x43, 0x36), LV_PART_MAIN);
         lv_obj_set_style_text_color(lv_msgbox_get_text(err_mbox), lv_color_white(), LV_PART_MAIN);
         lv_obj_set_style_text_color(lv_msgbox_get_btns(err_mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
-
-        lv_obj_t * close_btn = lv_msgbox_get_close_btn(err_mbox);
-        if (close_btn) {
-            lv_obj_set_style_bg_color(close_btn, lv_color_make(0x3B, 0x40, 0x4E), LV_PART_MAIN);
-            lv_obj_t * close_label = lv_obj_get_child(close_btn, 0);
-            if (close_label) {
-                lv_label_set_text(close_label, "×");
-                lv_obj_set_style_text_font(close_label, &lv_font_montserrat_16, LV_PART_MAIN);
-                lv_obj_set_style_text_color(close_label, lv_color_white(), LV_PART_MAIN);
-            }
-        }
     }
 }
 
