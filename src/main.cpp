@@ -371,6 +371,77 @@ static void add_settings_card(lv_obj_t * list, int * y, const char * icon_symbol
     *y += 88;
 }
 
+static void web_portal_switch_event_cb(lv_event_t * e) {
+    lv_obj_t * sw = lv_event_get_target(e);
+    lv_obj_t * subtitle_label = (lv_obj_t *)lv_event_get_user_data(e);
+    bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    if (is_on) {
+        system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
+        system("httpd -h /tuya/data/www -p 80 &");
+        if (subtitle_label) lv_label_set_text(subtitle_label, "Włączony (port 80)");
+        printf("[Settings] Portal WWW enabled.\n");
+    } else {
+        system("killall -9 httpd 2>/dev/null");
+        if (subtitle_label) lv_label_set_text(subtitle_label, "Wyłączony");
+        printf("[Settings] Portal WWW disabled.\n");
+    }
+}
+
+static void add_settings_card_switch(lv_obj_t * list, int * y, const char * icon_symbol,
+                                     lv_color_t icon_color, const char * title,
+                                     const char * subtitle, bool is_on,
+                                     lv_event_cb_t event_cb) {
+    lv_obj_t * card = lv_obj_create(list);
+    lv_obj_set_size(card, 424, 78);
+    lv_obj_set_pos(card, 28, *y);
+    lv_obj_set_style_bg_color(card, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 20, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(card, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t * icon_bg = lv_obj_create(card);
+    lv_obj_set_size(icon_bg, 48, 48);
+    lv_obj_set_pos(icon_bg, 14, 15);
+    lv_obj_set_style_bg_color(icon_bg, icon_color, LV_PART_MAIN);
+    lv_obj_set_style_border_width(icon_bg, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(icon_bg, 24, LV_PART_MAIN);
+    lv_obj_clear_flag(icon_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t * icon = lv_label_create(icon_bg);
+    lv_label_set_text(icon, icon_symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(icon, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_pos(title_label, 78, 13);
+    lv_obj_set_style_text_color(title_label, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
+
+    lv_obj_t * subtitle_label = lv_label_create(card);
+    lv_label_set_text(subtitle_label, subtitle);
+    lv_obj_set_pos(subtitle_label, 78, 43);
+    lv_obj_set_style_text_color(subtitle_label, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+
+    lv_obj_t * sw = lv_switch_create(card);
+    lv_obj_set_size(sw, 50, 26);
+    lv_obj_align(sw, LV_ALIGN_RIGHT_MID, -16, 0);
+    if (is_on) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    } else {
+        lv_obj_clear_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_set_style_bg_color(sw, lv_color_make(0x3B, 0x40, 0x4E), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_make(0x18, 0x65, 0xA8), LV_PART_MAIN | LV_STATE_CHECKED);
+    if (event_cb) {
+        lv_obj_add_event_cb(sw, event_cb, LV_EVENT_VALUE_CHANGED, subtitle_label);
+    }
+
+    *y += 88;
+}
+
 static void create_settings_screen(void) {
     if (settings_screen) return;
 
@@ -438,8 +509,14 @@ static void create_settings_screen(void) {
     add_settings_section(list, "HOME ASSISTANT", &y);
     add_settings_card(list, &y, ICON_HOME, lv_color_make(0x03, 0x78, 0xA6),
                       "Połączenie", ha_status.c_str(), SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
-                      "Portal WWW", "Planowane", SETTINGS_ACTION_NONE);
+
+    bool httpd_active = (system("pidof httpd >/dev/null") == 0);
+    add_settings_card_switch(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
+                           "Portal WWW",
+                           httpd_active ? "Włączony (port 80)" : "Wyłączony",
+                           httpd_active,
+                           web_portal_switch_event_cb);
+
     add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
                       "Asystent głosowy", "HA Assist / Wyoming - planowane", SETTINGS_ACTION_NONE);
 

@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOES TPP01-Z | Panel Control Center</title>
+    <style>
+        :root {
+            --bg-color: #121318;
+            --card-bg: #1D1F25;
+            --card-border: #2A2D36;
+            --primary: #1865A8;
+            --primary-hover: #1E74C0;
+            --accent: #FF9800;
+            --text-main: #E4E2E9;
+            --text-sub: #A9A6B0;
+            --success: #386A20;
+            --danger: #BA1A1A;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            background-color: var(--card-bg);
+            padding: 20px 24px;
+            border-radius: 16px;
+            border: 1px solid var(--card-border);
+        }
+
+        .header img {
+            width: 56px;
+            height: 56px;
+        }
+
+        .header-title h1 {
+            margin: 0;
+            font-size: 22px;
+            color: #ffffff;
+        }
+
+        .header-title p {
+            margin: 4px 0 0 0;
+            font-size: 13px;
+            color: var(--text-sub);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 16px;
+            border: 1px solid var(--card-border);
+            padding: 24px;
+            box-sizing: border-box;
+        }
+
+        .card h2 {
+            margin-top: 0;
+            font-size: 16px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: var(--text-sub);
+        }
+
+        input[type="text"], input[type="password"], textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            background-color: #121318;
+            color: var(--text-main);
+            font-size: 14px;
+            box-sizing: border-box;
+            transition: border-color 0.2s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 70px;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s, opacity 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        button.secondary {
+            background-color: #2A2D36;
+            color: var(--text-main);
+        }
+
+        button.secondary:hover {
+            background-color: #383C48;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .status-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #282B34;
+            font-size: 13px;
+        }
+
+        .status-item span:first-child {
+            color: var(--text-sub);
+        }
+
+        .status-item span:last-child {
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .screen-preview {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+
+        canvas {
+            width: 280px;
+            height: 280px;
+            border-radius: 16px;
+            border: 2px solid var(--card-border);
+            background-color: #000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+
+        .range-slider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .range-slider input[type="range"] {
+            flex: 1;
+        }
+
+        .footer {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-top: 10px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: var(--primary);
+            color: #fff;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+
+        .toast.show {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/6/6e/Home_Assistant_Logo.svg" alt="Home Assistant Logo">
+            <div class="header-title">
+                <h1>MOES TPP01-Z Panel</h1>
+                <p>Natywne Oprogramowanie C++ LVGL v8.3 | Wersja v1.5.0</p>
+            </div>
+        </div>
+
+        <div class="grid">
+            <!-- HA Configuration -->
+            <div class="card">
+                <h2>🌐 Połączenie Home Assistant</h2>
+                <form action="/cgi-bin/save_config.sh" method="POST" id="configForm">
+                    <div class="form-group">
+                        <label for="ha_url">Adres URL Home Assistant</label>
+                        <input type="text" id="ha_url" name="ha_url" placeholder="http://192.168.1.100:8123" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="ha_token">Długowieczny Token Dostępu (Access Token)</label>
+                        <textarea id="ha_token" name="ha_token" placeholder="Wklej token z profilu Home Assistant..." required></textarea>
+                    </div>
+
+                    <button type="submit">Zapisz i Zrestartuj Panel</button>
+                </form>
+            </div>
+
+            <!-- Screen Preview & Controls -->
+            <div class="card">
+                <h2>📺 Podgląd Ekranu na Żywo</h2>
+                <div class="screen-preview">
+                    <canvas id="screenCanvas" width="480" height="480"></canvas>
+                    <div class="btn-group" style="width: 100%;">
+                        <button type="button" class="secondary" onclick="refreshScreenshot()">Odśwież Ekran</button>
+                        <button type="button" class="secondary" onclick="toggleAutoRefresh(this)">Auto-Odświeżanie: OFF</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Status -->
+            <div class="card">
+                <h2>⚙️ Stan Urządzenia</h2>
+                <div class="status-list">
+                    <div class="status-item">
+                        <span>Adres IP Wi-Fi</span>
+                        <span id="stat-ip">Odczytywanie...</span>
+                    </div>
+                    <div class="status-item">
+                        <span>Połączenie HA</span>
+                        <span id="stat-ha">Sprawdzanie...</span>
+                    </div>
+                    <div class="status-item">
+                        <span>Wersja Oprogramowania</span>
+                        <span>v1.5.0</span>
+                    </div>
+                    <div class="status-item">
+                        <span>Czas Pracy (Uptime)</span>
+                        <span id="stat-uptime">-</span>
+                    </div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <label>Jasność Ekranu</label>
+                    <div class="range-slider">
+                        <input type="range" id="brightnessRange" min="5" max="100" value="80" onchange="setBrightness(this.value)">
+                        <span id="brightnessVal">80%</span>
+                    </div>
+                </div>
+
+                <div class="btn-group" style="margin-top: 15px;">
+                    <button type="button" class="secondary" onclick="triggerAction('restart_app')">Zrestartuj Aplikację</button>
+                    <button type="button" class="secondary" style="background: var(--danger);" onclick="triggerAction('reboot')">Restart Panelu</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            MOES TPP01-Z | Powered by OpenCode Native C++ & LVGL v8.3
+        </div>
+    </div>
+
+    <div id="toast" class="toast">Powiadomienie</div>
+
+    <script>
+        let autoRefreshTimer = null;
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function refreshScreenshot() {
+            fetch('/cgi-bin/screenshot.sh')
+                .then(res => res.arrayBuffer())
+                .then(buf => {
+                    if (buf.byteLength < 921600) return;
+                    const view = new Uint8Array(buf);
+                    const canvas = document.getElementById('screenCanvas');
+                    const ctx = canvas.getContext('2d');
+                    const imgData = ctx.createImageData(480, 480);
+                    const data = imgData.data;
+
+                    for (let i = 0, j = 0; i < 921600; i += 4, j += 4) {
+                        data[j]     = view[i + 2]; // Red
+                        data[j + 1] = view[i + 1]; // Green
+                        data[j + 2] = view[i];     // Blue
+                        data[j + 3] = 255;         // Alpha
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                })
+                .catch(err => console.error('Screenshot fetch error:', err));
+        }
+
+        function toggleAutoRefresh(btn) {
+            if (autoRefreshTimer) {
+                clearInterval(autoRefreshTimer);
+                autoRefreshTimer = null;
+                btn.innerText = 'Auto-Odświeżanie: OFF';
+            } else {
+                refreshScreenshot();
+                autoRefreshTimer = setInterval(refreshScreenshot, 1000);
+                btn.innerText = 'Auto-Odświeżanie: ON (1s)';
+            }
+        }
+
+        function setBrightness(val) {
+            document.getElementById('brightnessVal').innerText = val + '%';
+            fetch('/cgi-bin/action.sh?cmd=brightness&val=' + val)
+                .then(() => showToast('Zmieniono jasność na ' + val + '%'));
+        }
+
+        function triggerAction(action) {
+            if (confirm('Czy na pewno chcesz wykonać akcję: ' + action + '?')) {
+                fetch('/cgi-bin/action.sh?cmd=' + action)
+                    .then(() => showToast('Wysłano polecenie: ' + action));
+            }
+        }
+
+        function loadStatus() {
+            fetch('/cgi-bin/status.sh')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('stat-ip').innerText = data.ip || '-';
+                    document.getElementById('stat-ha').innerText = data.ha_configured ? 'Skonfigurowano' : 'Nie połączono';
+                    document.getElementById('stat-uptime').innerText = data.uptime || '-';
+                    if (data.ha_url) document.getElementById('ha_url').value = data.ha_url;
+                })
+                .catch(err => console.error('Status fetch error:', err));
+        }
+
+        // Initialize page
+        refreshScreenshot();
+        loadStatus();
+    </script>
+</body>
+</html>
