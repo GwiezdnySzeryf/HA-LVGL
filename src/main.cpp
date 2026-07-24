@@ -209,7 +209,12 @@ static void ota_update_timer_cb(lv_timer_t * timer) {
 
     if (!perform_github_ota()) {
         lv_msgbox_close(mbox);
-        lv_msgbox_create(NULL, "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", NULL, true);
+        lv_obj_t * err_mbox = lv_msgbox_create(lv_layer_top(), "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", NULL, true);
+        lv_obj_align(err_mbox, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_width(err_mbox, 360);
+        lv_obj_set_style_bg_color(err_mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_title(err_mbox), lv_color_make(0xF4, 0x43, 0x36), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_text(err_mbox), lv_color_white(), LV_PART_MAIN);
     }
 }
 
@@ -223,8 +228,12 @@ static void ota_msgbox_cb(lv_event_t * e) {
         lv_msgbox_close(obj);
         
         // Show temporary download modal on screen
-        lv_obj_t * mbox = lv_msgbox_create(NULL, "AKTUALIZACJA", "Pobieranie nowej wersji z GitHuba...", NULL, false);
+        lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "AKTUALIZACJA", "Pobieranie nowej wersji z GitHuba...", NULL, false);
         lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_width(mbox, 360);
+        lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+        lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
         lv_timer_create(ota_update_timer_cb, 150, mbox);
     } else { // "ZAMKNIJ" (Close)
         lv_msgbox_close(obj);
@@ -239,7 +248,7 @@ static void show_info_popup(void) {
     ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
     ss << "\n\nAktualizacje: GitHub";
 
-    lv_obj_t * mbox = lv_msgbox_create(NULL, "INFORMACJE", ss.str().c_str(), btns, false);
+    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "INFORMACJE", ss.str().c_str(), btns, false);
     lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_width(mbox, 360);
@@ -288,7 +297,7 @@ static void show_diagnostics_popup(void) {
     ss << "\nHome Assistant: ";
     ss << (config_exists() ? "skonfigurowany" : "nieskonfigurowany");
 
-    lv_obj_t * mbox = lv_msgbox_create(NULL, "DIAGNOSTYKA", ss.str().c_str(), buttons, false);
+    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "DIAGNOSTYKA", ss.str().c_str(), buttons, false);
     lv_obj_add_event_cb(mbox, diagnostics_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_width(mbox, 360);
