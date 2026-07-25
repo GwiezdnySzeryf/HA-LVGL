@@ -36,6 +36,52 @@ def print_header(status_text=""):
         print(f" Status: {C_YELLOW}{status_text}{C_RESET}")
         print(f"{C_CYAN}-----------------------------------------------------{C_RESET}")
 
+def run_adb_cmd(cmd_bytes, timeout=5):
+    """Executes a shell command via ADB socket 5037 with auto-login."""
+    try:
+        sock = socket.create_connection(("127.0.0.1", 5037), timeout=timeout)
+        payload = f"host:transport:{SERIAL}".encode("utf-8")
+        sock.sendall(f"{len(payload):04x}".encode("ascii") + payload)
+        if sock.recv(4) != b"OKAY":
+            sock.close()
+            return None
+
+        payload = b"shell:"
+        sock.sendall(f"{len(payload):04x}".encode("ascii") + payload)
+        if sock.recv(4) != b"OKAY":
+            sock.close()
+            return None
+
+        buffer = b""
+        start_time = time.time()
+        sent = False
+
+        while time.time() - start_time < timeout:
+            chunk = sock.recv(4096)
+            if not chunk: break
+            buffer += chunk
+
+            if b"login:" in buffer:
+                sock.sendall(b"root\n")
+                buffer = b""
+            elif b"Password:" in buffer:
+                sock.sendall(b"admin\n")
+                buffer = b""
+            elif b"#" in buffer:
+                if not sent:
+                    time.sleep(0.2)
+                    sock.sendall(cmd_bytes + b"\n")
+                    sent = True
+                    buffer = b""
+                else:
+                    break
+
+        res = buffer.decode("utf-8", errors="ignore")
+        sock.close()
+        return res
+    except Exception as e:
+        return f"Error: {e}"
+
 def run_telnet_cmd(cmd_bytes, ip=DEFAULT_IP, timeout=4):
     """Executes a shell command via Telnet port 23 over Wi-Fi."""
     try:
@@ -81,7 +127,7 @@ def run_panel_cmd(cmd_bytes, timeout=5):
     return res or "Brak połączenia (ADB i Telnet nieodpowiadają)"
 
 def check_process_status():
-    res = run_panel_cmd(b"ps w | grep -E 'ha_panel|voice_control|httpd'")
+    res = run_panel_cmd(b"ps w | grep -v grep | grep -E 'ha_panel|voice_control|httpd'")
     if not res: return "Brak połączenia z panelem"
     
     status = []
@@ -145,13 +191,13 @@ def build_and_deploy():
 def toggle_web_portal():
     print(f"\n{C_YELLOW}Przełączanie stanu Portalu WWW (httpd)...{C_RESET}")
     cmd = (
-        b"if pidof httpd >/dev/null; then "
-        b"  killall -9 httpd; echo 'Portal WWW Wyłączony'; "
-        b"else "
-        b"  chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null; "
-        b"  httpd -h /tuya/data/www -p 80 & echo 'Portal WWW Włączony na porcie 80'; "
-        b"fi"
-    )
+        "if pidof httpd >/dev/null; then "
+        "  killall -9 httpd; echo 'Portal WWW Wylaczony'; "
+        "else "
+        "  chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null; "
+        "  httpd -h /tuya/data/www -p 80 & echo 'Portal WWW Wlaczony na porcie 80'; "
+        "fi"
+    ).encode("utf-8")
     res = run_panel_cmd(cmd)
     print(f"{C_GREEN}{res}{C_RESET}")
     time.sleep(1.5)
