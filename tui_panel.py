@@ -36,22 +36,10 @@ def print_header(status_text=""):
         print(f" Status: {C_YELLOW}{status_text}{C_RESET}")
         print(f"{C_CYAN}-----------------------------------------------------{C_RESET}")
 
-def run_adb_cmd(cmd_bytes, timeout=5):
-    """Executes a shell command via ADB socket 5037 with auto-login."""
+def run_telnet_cmd(cmd_bytes, ip=DEFAULT_IP, timeout=4):
+    """Executes a shell command via Telnet port 23 over Wi-Fi."""
     try:
-        sock = socket.create_connection(("127.0.0.1", 5037), timeout=timeout)
-        payload = f"host:transport:{SERIAL}".encode("utf-8")
-        sock.sendall(f"{len(payload):04x}".encode("ascii") + payload)
-        if sock.recv(4) != b"OKAY":
-            sock.close()
-            return None
-
-        payload = b"shell:"
-        sock.sendall(f"{len(payload):04x}".encode("ascii") + payload)
-        if sock.recv(4) != b"OKAY":
-            sock.close()
-            return None
-
+        sock = socket.create_connection((ip, 23), timeout=timeout)
         buffer = b""
         start_time = time.time()
         sent = False
@@ -62,15 +50,15 @@ def run_adb_cmd(cmd_bytes, timeout=5):
             buffer += chunk
 
             if b"login:" in buffer:
-                sock.sendall(b"root\n")
+                sock.sendall(b"root\r\n")
                 buffer = b""
             elif b"Password:" in buffer:
-                sock.sendall(b"admin\n")
+                sock.sendall(b"admin\r\n")
                 buffer = b""
             elif b"#" in buffer:
                 if not sent:
                     time.sleep(0.2)
-                    sock.sendall(cmd_bytes + b"\n")
+                    sock.sendall(cmd_bytes + b"\r\n")
                     sent = True
                     buffer = b""
                 else:
@@ -79,12 +67,22 @@ def run_adb_cmd(cmd_bytes, timeout=5):
         res = buffer.decode("utf-8", errors="ignore")
         sock.close()
         return res
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception:
+        return None
+
+def run_panel_cmd(cmd_bytes, timeout=5):
+    """Tries ADB USB first, falls back seamlessly to Wi-Fi Telnet."""
+    res = run_adb_cmd(cmd_bytes, timeout=timeout)
+    if res and not res.startswith("Error:"):
+        return res
+    telnet_res = run_telnet_cmd(cmd_bytes, timeout=timeout)
+    if telnet_res:
+        return telnet_res
+    return res or "Brak połączenia (ADB i Telnet nieodpowiadają)"
 
 def check_process_status():
-    res = run_adb_cmd(b"ps w | grep -E 'ha_panel|voice_control|httpd'")
-    if not res: return "Brak połączenia ADB"
+    res = run_panel_cmd(b"ps w | grep -E 'ha_panel|voice_control|httpd'")
+    if not res: return "Brak połączenia z panelem"
     
     status = []
     if "ha_panel" in res:
@@ -111,13 +109,13 @@ def start_application():
         b"nohup /tuya/data/ha_panel > /tmp/ha_panel.log 2>&1 & "
         b"sleep 1; ps w | grep ha_panel"
     )
-    res = run_adb_cmd(cmd)
+    res = run_panel_cmd(cmd)
     print(f"{C_GREEN}Sukces! Statystyki procesu:{C_RESET}\n{res}")
     input("\nNaciśnij Enter, aby kontynuować...")
 
 def stop_application():
     print(f"\n{C_YELLOW}Zatrzymywanie aplikacji ha_panel...{C_RESET}")
-    run_adb_cmd(b"killall -9 ha_panel 2>/dev/null")
+    run_panel_cmd(b"killall -9 ha_panel 2>/dev/null")
     print(f"{C_GREEN}Aplikacja została zatrzymana.{C_RESET}")
     time.sleep(1)
 
@@ -154,7 +152,7 @@ def toggle_web_portal():
         b"  httpd -h /tuya/data/www -p 80 & echo 'Portal WWW Włączony na porcie 80'; "
         b"fi"
     )
-    res = run_adb_cmd(cmd)
+    res = run_panel_cmd(cmd)
     print(f"{C_GREEN}{res}{C_RESET}")
     time.sleep(1.5)
 
@@ -178,7 +176,7 @@ def capture_screenshot():
 
 def view_logs():
     print(f"\n{C_YELLOW}Odczytywanie logów /tmp/ha_panel.log...{C_RESET}")
-    res = run_adb_cmd(b"cat /tmp/ha_panel.log | tail -n 30")
+    res = run_panel_cmd(b"cat /tmp/ha_panel.log | tail -n 30")
     print(f"{C_CYAN}--- LOGI (Ostatnie 30 linii) ---{C_RESET}")
     print(res)
     input("\nNaciśnij Enter, aby kontynuować...")
@@ -213,7 +211,7 @@ def main_menu():
             view_logs()
         elif choice == "7":
             if input("Czy na pewno zrestartować urządzenie? (t/N): ").lower() == "t":
-                run_adb_cmd(b"reboot")
+                run_panel_cmd(b"reboot")
                 print(f"{C_RED}Wysłano polecenie reboot.{C_RESET}")
                 time.sleep(2)
         elif choice == "0":
