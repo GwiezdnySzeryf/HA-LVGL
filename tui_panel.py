@@ -149,7 +149,8 @@ def check_process_status():
 def start_application():
     print(f"\n{C_YELLOW}Uruchamianie aplikacji /tuya/data/ha_panel na panelu...{C_RESET}")
     cmd = (
-        b"killall -9 voice_control ha_panel 2>/dev/null; "
+        b"rm -f /tmp/safe_mode_triggered /tmp/safe_mode_record 2>/dev/null; "
+        b"killall -9 voice_control voice_control_safe_mode ha_panel 2>/dev/null; "
         b"echo 255 > /sys/class/backlight/backlight/brightness; "
         b"chmod +x /tuya/data/ha_panel; "
         b"nohup /tuya/data/ha_panel > /tmp/ha_panel.log 2>&1 & "
