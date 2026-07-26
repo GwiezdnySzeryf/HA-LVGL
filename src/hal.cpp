@@ -164,8 +164,12 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
         }
     }
     
-    // Notify Rockchip display subsystem to pan/flip buffer to physical screen
-    ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
+    // Only call pan ioctl on the very first flush to switch display from u-boot splash screen
+    static bool first_flush = true;
+    if (first_flush) {
+        ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
+        first_flush = false;
+    }
 
     lv_disp_flush_ready(disp_drv);
 }
