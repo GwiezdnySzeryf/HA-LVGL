@@ -19,6 +19,26 @@ bool hal_display_init(void);
 bool hal_touch_init(void);
 void hal_shutdown(void);
 
+extern bool g_screen_blanked;
+extern int g_active_backlight_raw;
+extern void hal_set_backlight(int raw_val);
+extern void hal_wake_screen(void);
+extern void hal_blank_screen(void);
+
+static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
+
+static void screensaver_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (screen_timeout_ms == 0) return; // 0 = Always ON
+
+    if (!g_screen_blanked) {
+        uint32_t inactive = lv_disp_get_inactive_time(NULL);
+        if (inactive >= screen_timeout_ms) {
+            hal_blank_screen();
+        }
+    }
+}
+
 // Global configuration variables
 std::string ha_url = "";
 std::string ha_token = "";
@@ -570,10 +590,8 @@ static void brightness_event_cb(lv_event_t * e) {
     int percent = lv_slider_get_value(slider);
     set_percent_label(brightness_value_label, percent);
 
-#ifndef PC_SIMULATOR
-    std::ofstream brightness("/sys/class/backlight/backlight/brightness");
-    if (brightness.is_open()) brightness << (percent * backlight_max / 100);
-#endif
+    int raw_val = percent * backlight_max / 100;
+    hal_set_backlight(raw_val);
 }
 
 static void apply_volume(int percent) {
@@ -715,12 +733,8 @@ static void create_control_center(lv_obj_t * scr) {
     int brightness = brightness_raw * 100 / backlight_max;
     if (brightness < 5) brightness = 5;
     if (brightness > 100) brightness = 100;
-#ifndef PC_SIMULATOR
-    if (brightness_raw != brightness * backlight_max / 100) {
-        std::ofstream brightness_file("/sys/class/backlight/backlight/brightness");
-        if (brightness_file.is_open()) brightness_file << (brightness * backlight_max / 100);
-    }
-#endif
+
+    hal_set_backlight(brightness * backlight_max / 100);
     create_control_slider(control_center, ICON_BRIGHTNESS, 88, 5, brightness,
                           brightness_event_cb, &brightness_value_label);
 
@@ -898,6 +912,7 @@ static void config_poll_timer(lv_timer_t * timer) {
 }
 
 int main(void) {
+    setbuf(stdout, NULL);
     printf("[HA Panel] Initializing Native LVGL Application...\n");
     
     // Clean old backup binary on start if it exists to release disk space
@@ -945,6 +960,12 @@ int main(void) {
             execv(args[0], args);
         }
     }
+
+    // Load screen timeout setting (default: 30 seconds)
+    int saved_timeout = read_int_file("/tuya/data/ha_screen_timeout", 30);
+    screen_timeout_ms = saved_timeout * 1000;
+    lv_timer_create(screensaver_timer_cb, 500, NULL);
+    printf("[ScreenSaver] Screen blanker initialized. Timeout: %u seconds.\n", saved_timeout);
 
     printf("[HA Panel] Main loop running. Rendering UI...\n");
 

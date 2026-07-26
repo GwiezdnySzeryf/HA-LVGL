@@ -132,6 +132,39 @@ static int touch_fd = -1;
 static int touch_x = 0;
 static int touch_y = 0;
 static int touch_pressed = 0;
+static bool wake_touch_consumed = false;
+
+bool g_screen_blanked = false;
+int g_active_backlight_raw = 200;
+
+void hal_set_backlight(int raw_val) {
+    if (!g_screen_blanked && raw_val > 0) {
+        g_active_backlight_raw = raw_val;
+    }
+#ifndef PC_SIMULATOR
+    FILE * f = fopen("/sys/class/backlight/backlight/brightness", "w");
+    if (f) {
+        fprintf(f, "%d\n", raw_val);
+        fclose(f);
+    }
+#endif
+}
+
+void hal_wake_screen(void) {
+    if (g_screen_blanked) {
+        g_screen_blanked = false;
+        hal_set_backlight(g_active_backlight_raw);
+        printf("[HAL] Screen woken up from blanked state.\n");
+    }
+}
+
+void hal_blank_screen(void) {
+    if (!g_screen_blanked) {
+        g_screen_blanked = true;
+        hal_set_backlight(0);
+        printf("[HAL] Screen blanked due to inactivity.\n");
+    }
+}
 
 /* System tick provider using clock_gettime */
 extern "C" uint32_t custom_tick_get(void) {
@@ -242,9 +275,22 @@ static void touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
         }
     }
 
+    if (g_screen_blanked && touch_pressed) {
+        hal_wake_screen();
+        wake_touch_consumed = true;
+    }
+
     data->point.x = touch_x;
     data->point.y = touch_y;
-    data->state = touch_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+
+    if (wake_touch_consumed) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        if (!touch_pressed) {
+            wake_touch_consumed = false;
+        }
+    } else {
+        data->state = touch_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    }
 }
 
 bool hal_touch_init(void) {
