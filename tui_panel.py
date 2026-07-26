@@ -206,9 +206,27 @@ def toggle_web_portal():
 def capture_screenshot():
     print(f"\n{C_YELLOW}Pobieranie zrzutu ekranu /dev/fb0 z panelu...{C_RESET}")
     raw_path = "/tmp/panel_fb0.raw"
-    subprocess.run(["adb", "-s", SERIAL, "pull", "/dev/fb0", raw_path], stdout=subprocess.DEVNULL)
-    
-    if os.path.exists(raw_path) and os.path.getsize(raw_path) >= 921600:
+    raw_data = None
+
+    # Try HTTP CGI endpoint first
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://{DEFAULT_IP}/cgi-bin/screenshot.sh", timeout=5) as resp:
+            raw_data = resp.read()
+    except Exception:
+        pass
+
+    # Fallback to ADB pull if HTTP endpoint failed
+    if not raw_data or len(raw_data) < 921600:
+        subprocess.run(["adb", "-s", SERIAL, "pull", "/dev/fb0", raw_path], stdout=subprocess.DEVNULL)
+        if os.path.exists(raw_path):
+            with open(raw_path, "rb") as f:
+                raw_data = f.read()
+
+    if raw_data and len(raw_data) >= 921600:
+        with open(raw_path, "wb") as f:
+            f.write(raw_data[:921600])
+
         png_path = "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/screenshots/screenshot_latest.png"
         os.makedirs(os.path.dirname(png_path), exist_ok=True)
         # Convert raw BGRA 480x480 to PNG using ffmpeg
