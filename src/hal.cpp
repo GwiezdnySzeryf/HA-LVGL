@@ -136,6 +136,7 @@ static bool wake_touch_consumed = false;
 
 bool g_screen_blanked = false;
 int g_active_backlight_raw = 200;
+uint32_t g_last_wake_time = 0;
 
 void hal_set_backlight(int raw_val) {
     if (!g_screen_blanked && raw_val > 0) {
@@ -153,7 +154,9 @@ void hal_set_backlight(int raw_val) {
 void hal_wake_screen(void) {
     if (g_screen_blanked) {
         g_screen_blanked = false;
+        g_last_wake_time = custom_tick_get();
         hal_set_backlight(g_active_backlight_raw);
+        lv_disp_trig_activity(NULL);
         printf("[HAL] Screen woken up from blanked state.\n");
     }
 }

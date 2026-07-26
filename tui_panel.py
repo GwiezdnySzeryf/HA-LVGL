@@ -22,7 +22,41 @@ C_CYAN = "\033[36m"
 C_BG_DARK = "\033[40m"
 
 SERIAL = "100211471004F0"
-DEFAULT_IP = "192.168.1.140"
+DEFAULT_IP = "192.168.1.111"
+
+def discover_panel_ip():
+    global DEFAULT_IP
+    for test_ip in [DEFAULT_IP, "192.168.1.140", "192.168.1.111"]:
+        try:
+            s = socket.socket()
+            s.settimeout(0.2)
+            s.connect((test_ip, 23))
+            s.close()
+            DEFAULT_IP = test_ip
+            return test_ip
+        except Exception:
+            pass
+
+    import concurrent.futures
+    def check_ip(i):
+        ip = f"192.168.1.{i}"
+        try:
+            s = socket.socket()
+            s.settimeout(0.2)
+            s.connect((ip, 23))
+            s.close()
+            return ip
+        except Exception:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+        found = [r for r in ex.map(check_ip, range(1, 255)) if r]
+
+    if found:
+        DEFAULT_IP = found[0]
+        return found[0]
+
+    return DEFAULT_IP
 
 def clear_screen():
     os.system("clear" if os.name != "nt" else "cls")

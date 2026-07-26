@@ -21,9 +21,11 @@ void hal_shutdown(void);
 
 extern bool g_screen_blanked;
 extern int g_active_backlight_raw;
+extern uint32_t g_last_wake_time;
 extern void hal_set_backlight(int raw_val);
 extern void hal_wake_screen(void);
 extern void hal_blank_screen(void);
+extern "C" uint32_t custom_tick_get(void);
 
 static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
 
@@ -32,6 +34,12 @@ static void screensaver_timer_cb(lv_timer_t * timer) {
     if (screen_timeout_ms == 0) return; // 0 = Always ON
 
     if (!g_screen_blanked) {
+        uint32_t now = custom_tick_get();
+        if (g_last_wake_time > 0 && (now - g_last_wake_time < 5000)) {
+            lv_disp_trig_activity(NULL);
+            return;
+        }
+
         uint32_t inactive = lv_disp_get_inactive_time(NULL);
         if (inactive >= screen_timeout_ms) {
             hal_blank_screen();
