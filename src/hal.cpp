@@ -164,6 +164,9 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
         }
     }
     
+    // Notify Rockchip display subsystem to pan/flip buffer to physical screen
+    ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
+
     lv_disp_flush_ready(disp_drv);
 }
 
@@ -184,6 +187,10 @@ bool hal_display_init(void) {
         close(fb_fd);
         return false;
     }
+
+    // Force unblank framebuffer
+    ioctl(fb_fd, FBIOBLANK, FB_BLANK_UNBLANK);
+    ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
 
     printf("[HAL] Screen Mode: %dx%d (virtual %dx%d), bpp=%d, line_length=%d, offset=(%d,%d)\n",
            vinfo.xres, vinfo.yres, vinfo.xres_virtual, vinfo.yres_virtual,
