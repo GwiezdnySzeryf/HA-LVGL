@@ -83,32 +83,34 @@ def run_adb_cmd(cmd_bytes, timeout=5):
         return f"Error: {e}"
 
 def run_telnet_cmd(cmd_bytes, ip=DEFAULT_IP, timeout=4):
-    """Executes a shell command via Telnet port 23 over Wi-Fi."""
+    """Executes a shell command via raw netcat/telnet port 23 over Wi-Fi."""
     try:
         sock = socket.create_connection((ip, 23), timeout=timeout)
+        sock.settimeout(1.5)
+        
+        # Send command immediately in case it is raw netcat shell
+        sock.sendall(cmd_bytes + b"\n")
+        
+        time.sleep(0.3)
         buffer = b""
         start_time = time.time()
-        sent = False
 
         while time.time() - start_time < timeout:
-            chunk = sock.recv(4096)
-            if not chunk: break
-            buffer += chunk
+            try:
+                chunk = sock.recv(4096)
+                if not chunk: break
+                buffer += chunk
 
-            if b"login:" in buffer:
-                sock.sendall(b"root\r\n")
-                buffer = b""
-            elif b"Password:" in buffer:
-                sock.sendall(b"admin\r\n")
-                buffer = b""
-            elif b"#" in buffer:
-                if not sent:
-                    time.sleep(0.2)
-                    sock.sendall(cmd_bytes + b"\r\n")
-                    sent = True
+                if b"login:" in buffer:
+                    sock.sendall(b"root\n")
                     buffer = b""
-                else:
+                elif b"Password:" in buffer:
+                    sock.sendall(b"admin\n")
+                    buffer = b""
+                elif b"#" in buffer or len(buffer) > 100:
                     break
+            except socket.timeout:
+                if buffer: break
 
         res = buffer.decode("utf-8", errors="ignore")
         sock.close()
