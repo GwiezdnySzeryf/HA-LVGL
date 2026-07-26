@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -42,6 +43,7 @@ static void screensaver_timer_cb(lv_timer_t * timer) {
 
         uint32_t inactive = lv_disp_get_inactive_time(NULL);
         if (inactive >= screen_timeout_ms) {
+            printf("[ScreenSaver %u ms] Inactivity timeout (%u >= %u ms). Blanking screen!\n", now, inactive, screen_timeout_ms);
             hal_blank_screen();
         }
     }
@@ -88,20 +90,26 @@ LV_FONT_DECLARE(lv_font_control_icons_24);
 #define ICON_BLUETOOTH  "\xEF\x8A\x93"
 #define ICON_PALETTE    "\xEF\x94\xBF"
 
-// Helper function to get wlan0 IP address dynamically
+// Helper function to get panel IP address dynamically across all interfaces
 std::string get_wlan0_ip() {
-    int fd;
-    struct ifreq ifr;
+    struct ifaddrs *ifaddr, *ifa;
     std::string ip = "127.0.0.1";
 
-    fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd >= 0) {
-        ifr.ifr_addr.sa_family = AF_INET;
-        strncpy(ifr.ifr_name, "wlan0", IFNAMSIZ-1);
-        if (ioctl(fd, SIOCGIFADDR, &ifr) == 0) {
-            ip = inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
+    if (getifaddrs(&ifaddr) == 0) {
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+            if (ifa->ifa_addr == NULL) continue;
+            if (ifa->ifa_addr->sa_family == AF_INET) {
+                std::string if_name = ifa->ifa_name;
+                if (if_name != "lo") {
+                    char host[INET_ADDRSTRLEN];
+                    struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+                    inet_ntop(AF_INET, &(sa->sin_addr), host, INET_ADDRSTRLEN);
+                    ip = host;
+                    if (if_name == "wlan0") break; // Prefer wlan0
+                }
+            }
         }
-        close(fd);
+        freeifaddrs(ifaddr);
     }
     return ip;
 }

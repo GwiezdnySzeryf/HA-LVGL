@@ -142,6 +142,7 @@ void hal_set_backlight(int raw_val) {
     if (!g_screen_blanked && raw_val > 0) {
         g_active_backlight_raw = raw_val;
     }
+    printf("[HAL %u ms] Set backlight: %d (blanked=%d, active_raw=%d)\n", custom_tick_get(), raw_val, g_screen_blanked, g_active_backlight_raw);
 #ifndef PC_SIMULATOR
     FILE * f = fopen("/sys/class/backlight/backlight/brightness", "w");
     if (f) {
@@ -155,17 +156,17 @@ void hal_wake_screen(void) {
     if (g_screen_blanked) {
         g_screen_blanked = false;
         g_last_wake_time = custom_tick_get();
+        printf("[HAL %u ms] Screen woken up from blanked state.\n", g_last_wake_time);
         hal_set_backlight(g_active_backlight_raw);
         lv_disp_trig_activity(NULL);
-        printf("[HAL] Screen woken up from blanked state.\n");
     }
 }
 
 void hal_blank_screen(void) {
     if (!g_screen_blanked) {
         g_screen_blanked = true;
+        printf("[HAL %u ms] Screen blanked requested.\n", custom_tick_get());
         hal_set_backlight(0);
-        printf("[HAL] Screen blanked due to inactivity.\n");
     }
 }
 
@@ -263,6 +264,7 @@ bool hal_display_init(void) {
 
 static void touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
     struct input_event ev;
+    bool press_detected_in_this_read = false;
     
     while (read(touch_fd, &ev, sizeof(struct input_event)) > 0) {
         if (ev.type == 3) { // EV_ABS
@@ -271,14 +273,17 @@ static void touch_read_cb(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
             } else if (ev.code == 54) { // ABS_MT_POSITION_Y
                 touch_y = ev.value;
             } else if (ev.code == 57) { // ABS_MT_TRACKING_ID
-                touch_pressed = (ev.value != -1);
+                bool now_pressed = (ev.value != -1);
+                if (now_pressed) press_detected_in_this_read = true;
+                touch_pressed = now_pressed;
             }
         } else if (ev.type == 1 && ev.code == 330) { // EV_KEY -> BTN_TOUCH
+            if (ev.value) press_detected_in_this_read = true;
             touch_pressed = ev.value;
         }
     }
 
-    if (g_screen_blanked && touch_pressed) {
+    if (g_screen_blanked && (touch_pressed || press_detected_in_this_read)) {
         hal_wake_screen();
         wake_touch_consumed = true;
     }
