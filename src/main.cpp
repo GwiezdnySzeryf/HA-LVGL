@@ -600,6 +600,7 @@ static void web_portal_switch_event_cb(lv_event_t * e) {
     bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
 
     if (is_on) {
+        system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
         system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
         system("httpd -h /tuya/data/www -p 80 &");
         if (subtitle_label) lv_label_set_text(subtitle_label, "Włączony (port 80)");
