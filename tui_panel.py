@@ -222,6 +222,16 @@ def stop_application():
     print(f"{C_GREEN}Aplikacja została zatrzymana.{C_RESET}")
     time.sleep(1)
 
+def get_host_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "192.168.1.44"
+
 def build_and_deploy():
     print(f"\n{C_YELLOW}1. Kompilacja projektu C++ / LVGL (make)...{C_RESET}")
     ret = subprocess.run(["make", "-j4"], cwd="/home/tomasz/OpenCode/Inne/TPP01_HA_Panel")
@@ -230,18 +240,33 @@ def build_and_deploy():
         input("\nNaciśnij Enter, aby kontynuować...")
         return
 
-    print(f"\n{C_YELLOW}2. Przesyłanie binarki /tuya/data/ha_panel przez ADB...{C_RESET}")
-    ret = subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/ha_panel", "/tuya/data/ha_panel"])
-    if ret.returncode != 0:
-        print(f"{C_RED}Błąd przesyłania ADB push!{C_RESET}")
-        input("\nNaciśnij Enter, aby kontynuować...")
-        return
-
-    print(f"\n{C_YELLOW}3. Przesyłanie plików portalu WWW (/tuya/data/www/)...{C_RESET}")
-    subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/index.html", "/tuya/data/www/index.html"])
-    subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/cgi-bin/screenshot.sh", "/tuya/data/www/cgi-bin/screenshot.sh"])
-    subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/cgi-bin/status.sh", "/tuya/data/www/cgi-bin/status.sh"])
-    subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/cgi-bin/action.sh", "/tuya/data/www/cgi-bin/action.sh"])
+    print(f"\n{C_YELLOW}2. Przesyłanie nowej wersji na panel...{C_RESET}")
+    # Try ADB USB push first
+    adb_res = subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/ha_panel", "/tuya/data/ha_panel.tmp"], capture_output=True, text=True)
+    
+    if adb_res.returncode == 0:
+        print(f"{C_GREEN}Przesłano pomyślnie przez ADB USB!{C_RESET}")
+        run_panel_cmd(b"killall -9 ha_panel 2>/dev/null; mv /tuya/data/ha_panel.tmp /tuya/data/ha_panel; chmod +x /tuya/data/ha_panel")
+        subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/index.html", "/tuya/data/www/index.html"], stdout=subprocess.DEVNULL)
+    else:
+        # Fallback to local HTTP server + wget over Wi-Fi
+        host_ip = get_host_ip()
+        print(f"{C_YELLOW}Brak ADB USB. Uruchamianie serwera HTTP na host ({host_ip}:8000)...{C_RESET}")
+        srv = subprocess.Popen(["python3", "-m", "http.server", "8000", "--bind", "0.0.0.0"], cwd="/home/tomasz/OpenCode/Inne/TPP01_HA_Panel")
+        time.sleep(1.0)
+        try:
+            cmd = (
+                f"killall -9 ha_panel 2>/dev/null; "
+                f"rm -f /tuya/data/ha_panel.tmp; "
+                f"wget http://{host_ip}:8000/ha_panel -O /tuya/data/ha_panel.tmp && "
+                f"wget http://{host_ip}:8000/www/index.html -O /tuya/data/www/index.html && "
+                f"mv /tuya/data/ha_panel.tmp /tuya/data/ha_panel && "
+                f"chmod +x /tuya/data/ha_panel\n"
+            ).encode("utf-8")
+            run_panel_cmd(cmd)
+            time.sleep(3.0)
+        finally:
+            srv.terminate()
 
     start_application()
 
