@@ -60,7 +60,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.6.0";
+const char * CURRENT_VERSION = "v1.7.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -156,6 +156,16 @@ std::string parse_json_value(const std::string &json, const std::string &key) {
     if (end_quote == std::string::npos) return "";
     
     return json.substr(start_quote + 1, end_quote - start_quote - 1);
+}
+
+size_t parse_json_int_value(const std::string &json, const std::string &key) {
+    size_t key_pos = json.find("\"" + key + "\"");
+    if (key_pos == std::string::npos) return 0;
+    size_t colon_pos = json.find(":", key_pos);
+    if (colon_pos == std::string::npos) return 0;
+    size_t val_start = json.find_first_of("0123456789", colon_pos);
+    if (val_start == std::string::npos) return 0;
+    return (size_t)atoll(json.c_str() + val_start);
 }
 
 // Load config file values
@@ -325,8 +335,13 @@ static void state_poll_timer_cb(lv_timer_t * timer) {
     publish_panel_state_to_ha();
 }
 
+struct OtaModalData {
+    lv_obj_t * mbox;
+    lv_obj_t * bar;
+};
+
 // Perform OTA self-replacement update directly from GitHub Releases API
-bool perform_github_ota() {
+bool perform_github_ota(lv_obj_t * mbox, lv_obj_t * bar) {
     printf("[OTA] Starting OTA process...\n");
     
     // 1. Fetch latest release info via secure wget command from public repo
@@ -349,25 +364,61 @@ bool perform_github_ota() {
     
     std::string tag_name = parse_json_value(json, "tag_name");
     std::string download_url = parse_json_value(json, "browser_download_url");
+    size_t expected_size = parse_json_int_value(json, "size");
     
     if (tag_name.empty() || download_url.empty()) {
         printf("[OTA] Error: Failed to parse tag_name or download URL. Releases might be empty.\n");
         return false;
     }
+
+    if (expected_size == 0) expected_size = 2300000; // Fallback default ~2.3MB
     
-    printf("[OTA] Latest version: %s (Current: %s)\n", tag_name.c_str(), CURRENT_VERSION);
+    printf("[OTA] Latest version: %s (Current: %s), Size: %zu bytes\n", tag_name.c_str(), CURRENT_VERSION, expected_size);
     if (tag_name == CURRENT_VERSION) {
         printf("[OTA] Panel is already up to date!\n");
         return false;
     }
     
     // 2. Download the binary asset from public URL
+    unlink("/tuya/data/ha_panel.tmp");
     printf("[OTA] Downloading new binary asset from %s...\n", download_url.c_str());
     std::string cmd_download = "wget -q --header=\"User-Agent: Mozilla/5.0\" "
-                               "-O /tuya/data/ha_panel.tmp " + download_url;
+                               "-O /tuya/data/ha_panel.tmp " + download_url + " &";
                                
-    int ret = system(cmd_download.c_str());
-    if (ret != 0 || access("/tuya/data/ha_panel.tmp", F_OK) != 0) {
+    system(cmd_download.c_str());
+
+    // Monitor download progress
+    int last_pct = -1;
+    uint32_t start_ticks = custom_tick_get();
+    while (custom_tick_get() - start_ticks < 60000) { // 60s timeout max
+        struct stat st;
+        if (stat("/tuya/data/ha_panel.tmp", &st) == 0) {
+            int pct = (int)((st.st_size * 100) / expected_size);
+            if (pct > 100) pct = 100;
+
+            if (pct != last_pct) {
+                last_pct = pct;
+                if (bar) lv_bar_set_value(bar, pct, LV_ANIM_OFF);
+                if (mbox) {
+                    char status_txt[128];
+                    snprintf(status_txt, sizeof(status_txt), "Pobieranie: %d%% (%ld / %ld KB)", pct, (long)(st.st_size / 1024), (long)(expected_size / 1024));
+                    lv_label_set_text(lv_msgbox_get_text(mbox), status_txt);
+                }
+            }
+
+            if (st.st_size >= (off_t)expected_size && system("pidof wget >/dev/null") != 0) {
+                if (bar) lv_bar_set_value(bar, 100, LV_ANIM_OFF);
+                if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Instalowanie i restart...");
+                lv_timer_handler();
+                usleep(300000);
+                break;
+            }
+        }
+        lv_timer_handler();
+        usleep(100000); // 100ms
+    }
+
+    if (access("/tuya/data/ha_panel.tmp", F_OK) != 0) {
         printf("[OTA] Error: Failed to download binary asset.\n");
         return false;
     }
@@ -421,13 +472,14 @@ static void msgbox_close_cb(lv_event_t * e) {
 }
 
 static void ota_update_timer_cb(lv_timer_t * timer) {
-    lv_obj_t * mbox = (lv_obj_t *)timer->user_data;
+    OtaModalData * data = (OtaModalData *)timer->user_data;
     lv_timer_del(timer);
 
-    if (!perform_github_ota()) {
-        lv_msgbox_close(mbox);
+    if (!perform_github_ota(data->mbox, data->bar)) {
+        lv_msgbox_close(data->mbox);
+        delete data;
         static const char * err_btns[] = {"ZAMKNIJ", ""};
-        lv_obj_t * err_mbox = lv_msgbox_create(lv_layer_top(), "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie.", err_btns, false);
+        lv_obj_t * err_mbox = lv_msgbox_create(lv_layer_top(), "BŁĄD", "Aktualizacja nie powiodła się!\nSprawdź połączenie lub wersję.", err_btns, false);
         lv_obj_add_event_cb(err_mbox, msgbox_close_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_align(err_mbox, LV_ALIGN_CENTER, 0, 0);
         lv_obj_set_width(err_mbox, 360);
@@ -447,14 +499,24 @@ static void ota_msgbox_cb(lv_event_t * e) {
         printf("[OTA Click] Triggering OTA update...\n");
         lv_msgbox_close(obj);
         
-        // Show temporary download modal on screen
-        lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "AKTUALIZACJA", "Pobieranie nowej wersji z GitHuba...", NULL, false);
+        // Show temporary download modal on screen with progress bar
+        lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "AKTUALIZACJA", "Łączenie z GitHubem...\n0%", NULL, false);
         lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
         lv_obj_set_width(mbox, 360);
         lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
         lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
         lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
-        lv_timer_create(ota_update_timer_cb, 150, mbox);
+
+        lv_obj_t * bar = lv_bar_create(mbox);
+        lv_obj_set_size(bar, 300, 16);
+        lv_bar_set_range(bar, 0, 100);
+        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(bar, lv_color_make(0x4A, 0x4E, 0x59), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(bar, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_INDICATOR);
+        lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+        OtaModalData * data = new OtaModalData{mbox, bar};
+        lv_timer_create(ota_update_timer_cb, 150, data);
     } else { // "ZAMKNIJ" (Close)
         lv_msgbox_close(obj);
     }
@@ -932,6 +994,7 @@ static void create_control_center(lv_obj_t * scr) {
     lv_obj_set_style_border_width(control_center, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(control_center, 0, LV_PART_MAIN);
     lv_obj_clear_flag(control_center, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(control_center, control_center_drag_event_cb, LV_EVENT_ALL, NULL);
 
     backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
     if (backlight_max < 1) backlight_max = 255;
@@ -964,21 +1027,13 @@ static void create_control_center(lv_obj_t * scr) {
     lv_obj_align(settings_icon, LV_ALIGN_CENTER, 0, 0);
 
     lv_obj_t * handle_zone = lv_obj_create(control_center);
-    lv_obj_set_size(handle_zone, 480, 64);
+    lv_obj_set_size(handle_zone, 480, 80);
     lv_obj_align(handle_zone, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(handle_zone, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(handle_zone, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(handle_zone, 0, LV_PART_MAIN);
     lv_obj_clear_flag(handle_zone, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(handle_zone, control_center_drag_event_cb, LV_EVENT_ALL, NULL);
-
-    lv_obj_t * handle = lv_obj_create(handle_zone);
-    lv_obj_set_size(handle, 72, 8);
-    lv_obj_align(handle, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(handle, lv_color_make(0x79, 0x7E, 0x89), LV_PART_MAIN);
-    lv_obj_set_style_border_width(handle, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(handle, 4, LV_PART_MAIN);
-    lv_obj_clear_flag(handle, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * edge = lv_obj_create(scr);
     lv_obj_set_size(edge, 480, 30);

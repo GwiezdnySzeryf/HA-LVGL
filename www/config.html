@@ -98,7 +98,7 @@
             <img src="https://upload.wikimedia.org/wikipedia/commons/6/6e/Home_Assistant_Logo.svg" alt="Home Assistant" style="width: 80px; height: 80px;">
         </div>
         <h1>🏡 TPP01-Z Panel</h1>
-        <p>Skonfiguruj połączenie panelu z serwerem Home Assistant oraz podaj opcjonalny Token GitHub do pobierania aktualizacji OTA.</p>
+        <p>Skonfiguruj lokalne połączenie panelu z Home Assistant i wybierz dwie encje sterowane z ekranu.</p>
         
         <form action="/cgi-bin/save_config.sh" method="POST">
             <div class="form-group">
@@ -109,6 +109,26 @@
             <div class="form-group">
                 <label for="ha_token">Token dostępu (Long-Lived Access Token)</label>
                 <textarea id="ha_token" name="ha_token" placeholder="Wklej tutaj długi token wygenerowany w profilu HA..." required></textarea>
+            </div>
+
+            <div class="form-group">
+                <label for="entity_1">Pierwsza encja</label>
+                <input type="text" id="entity_1" name="entity_1" placeholder="np. light.salon" pattern="[a-z0-9_]+\.[a-z0-9_]+" required>
+            </div>
+
+            <div class="form-group">
+                <label for="entity_1_name">Nazwa pierwszego przycisku</label>
+                <input type="text" id="entity_1_name" name="entity_1_name" value="ŚWIATŁO" maxlength="24" required>
+            </div>
+
+            <div class="form-group">
+                <label for="entity_2">Druga encja</label>
+                <input type="text" id="entity_2" name="entity_2" placeholder="np. fan.lazienka" pattern="[a-z0-9_]+\.[a-z0-9_]+" required>
+            </div>
+
+            <div class="form-group">
+                <label for="entity_2_name">Nazwa drugiego przycisku</label>
+                <input type="text" id="entity_2_name" name="entity_2_name" value="WENTYLATOR" maxlength="24" required>
             </div>
             
             <button type="submit">Zapisz i Uruchom panel</button>

@@ -13,20 +13,41 @@ urldecode() {
     printf '%b\n' "$(echo "$1" | sed 's/+/ /g; s/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
 }
 
-# Parse parameters: ha_url=...&ha_token=...
+# Parse the fixed configuration fields.
 HA_URL_RAW=$(echo "$POST_DATA" | grep -o 'ha_url=[^&]*' | cut -d= -f2)
 HA_TOKEN_RAW=$(echo "$POST_DATA" | grep -o 'ha_token=[^&]*' | cut -d= -f2)
+ENTITY_1_RAW=$(echo "$POST_DATA" | grep -o 'entity_1=[^&]*' | cut -d= -f2)
+ENTITY_1_NAME_RAW=$(echo "$POST_DATA" | grep -o 'entity_1_name=[^&]*' | cut -d= -f2)
+ENTITY_2_RAW=$(echo "$POST_DATA" | grep -o 'entity_2=[^&]*' | cut -d= -f2)
+ENTITY_2_NAME_RAW=$(echo "$POST_DATA" | grep -o 'entity_2_name=[^&]*' | cut -d= -f2)
 
 HA_URL=$(urldecode "$HA_URL_RAW")
 HA_TOKEN=$(urldecode "$HA_TOKEN_RAW")
+ENTITY_1=$(urldecode "$ENTITY_1_RAW")
+ENTITY_1_NAME=$(urldecode "$ENTITY_1_NAME_RAW")
+ENTITY_2=$(urldecode "$ENTITY_2_RAW")
+ENTITY_2_NAME=$(urldecode "$ENTITY_2_NAME_RAW")
+
+case "$HA_URL" in http://*) ;; *) exit 1 ;; esac
+echo "$HA_URL" | grep -Eq '^http://[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$' || exit 1
+echo "$HA_TOKEN" | grep -Eq '^[A-Za-z0-9._-]+$' || exit 1
+echo "$ENTITY_1" | grep -Eq '^[a-z0-9_]+\.[a-z0-9_]+$' || exit 1
+echo "$ENTITY_2" | grep -Eq '^[a-z0-9_]+\.[a-z0-9_]+$' || exit 1
+echo "$ENTITY_1_NAME$ENTITY_2_NAME" | grep -q '["\\]' && exit 1
 
 # Save credentials as JSON config
 cat <<EOF > /tuya/data/ha_config.json
 {
   "ha_url": "$HA_URL",
-  "ha_token": "$HA_TOKEN"
+  "ha_token": "$HA_TOKEN",
+  "entity_1": "$ENTITY_1",
+  "entity_1_name": "$ENTITY_1_NAME",
+  "entity_2": "$ENTITY_2",
+  "entity_2_name": "$ENTITY_2_NAME"
 }
 EOF
+
+chmod 600 /tuya/data/ha_config.json
 
 # Output beautiful dark-themed success page with correct utf-8 charset
 cat <<EOF
