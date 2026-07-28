@@ -182,19 +182,54 @@ def check_process_status():
 
     return " | ".join(status)
 
+def monitor_startup(duration_sec=5):
+    """Monitors process state and live logs for a few seconds post-launch."""
+    print(f"\n{C_CYAN}=== Monitorowanie startu aplikacji ({duration_sec}s) ==={C_RESET}")
+
+    for i in range(1, duration_sec + 1):
+        time.sleep(1)
+        res_ps = run_panel_cmd(b"ps w | grep -v grep")
+        res_log = run_panel_cmd(b"cat /tmp/ha_panel.log 2>/dev/null | tail -n 3")
+
+        ha_running = False
+        safe_mode = False
+
+        if res_ps:
+            for line in res_ps.splitlines():
+                if "grep" in line: continue
+                if "/tuya/data/ha_panel" in line or " ha_panel" in line:
+                    if " S " in line or " R " in line:
+                        ha_running = True
+                if "voice_control_safe_mode" in line:
+                    if " S " in line or " R " in line:
+                        safe_mode = True
+
+        status_str = f"{C_GREEN}AKTYWNY{C_RESET}" if ha_running else f"{C_RED}NIEAKTYWNY{C_RESET}"
+        if safe_mode:
+            status_str += f" | {C_RED}OSTRZEŻENIE: Wykryto Safe Mode!{C_RESET}"
+
+        print(f" [{i}/{duration_sec}s] Stan ha_panel: {status_str}")
+
+        if res_log and res_log.strip():
+            lines = [line.strip() for line in res_log.strip().splitlines() if line.strip() and not line.startswith("cat ") and not line.startswith("#")]
+            if lines:
+                print(f"     Ostatnie logi: {C_YELLOW}{' | '.join(lines)}{C_RESET}")
+
+    print(f"{C_CYAN}====================================================={C_RESET}\n")
+
 def start_application():
     print(f"\n{C_YELLOW}Uruchamianie aplikacji /tuya/data/ha_panel na panelu...{C_RESET}")
     cmd = (
         b"rm -f /tmp/safe_mode_triggered /tmp/safe_mode_record 2>/dev/null; "
+        b"killall -STOP tuya_monitor.sh 2>/dev/null; "
         b"killall -9 voice_control voice_control_safe_mode ha_panel 2>/dev/null; "
         b"echo 255 > /sys/class/backlight/backlight/brightness; "
         b"chmod +x /tuya/data/ha_panel; "
-        b"nohup /tuya/data/ha_panel > /tmp/ha_panel.log 2>&1 & "
-        b"sleep 1; ps w | grep ha_panel"
+        b"nohup /tuya/data/ha_panel > /tmp/ha_panel.log 2>&1 &"
     )
-    res = run_panel_cmd(cmd)
-    print(f"{C_GREEN}Sukces! Statystyki procesu:{C_RESET}\n{res}")
-    input("\nNaciśnij Enter, aby kontynuować...")
+    run_panel_cmd(cmd)
+    monitor_startup(5)
+    input("Naciśnij Enter, aby kontynuować...")
 
 def stop_application():
     print(f"\n{C_YELLOW}Zatrzymywanie aplikacji ha_panel...{C_RESET}")
