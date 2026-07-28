@@ -11,11 +11,16 @@ if [ "$CMD" = "brightness" ] && [ -n "$VAL" ]; then
 fi
 
 if [ "$CMD" = "restart_app" ]; then
-    (sleep 1; killall -9 ha_panel; /tuya/data/ha_panel &) &
+    (sleep 1; killall -9 ha_panel; /tuya/data/ha_panel >/tmp/ha_panel.log 2>&1 &) &
 fi
 
 if [ "$CMD" = "reboot" ]; then
     (sleep 1; reboot) &
+fi
+
+if [ "$CMD" = "disconnect_ha" ]; then
+    rm -f /tuya/data/ha_config.json
+    (sleep 1; killall -9 ha_panel; /tuya/data/ha_panel >/tmp/ha_panel.log 2>&1 &) &
 fi
 
 cat <<EOF

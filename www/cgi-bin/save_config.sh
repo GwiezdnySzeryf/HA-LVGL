@@ -95,18 +95,33 @@ ENTITY_1_NAME=$(urldecode "$ENTITY_1_NAME_RAW")
 ENTITY_2=$(urldecode "$ENTITY_2_RAW")
 ENTITY_2_NAME=$(urldecode "$ENTITY_2_NAME_RAW")
 
+# Read existing config values as defaults if not provided in POST
+if [ -f "/tuya/data/ha_config.json" ]; then
+    EXIST_URL=$(grep -o '"ha_url": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_TOKEN=$(grep -o '"ha_token": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_E1=$(grep -o '"entity_1": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_E1N=$(grep -o '"entity_1_name": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_E2=$(grep -o '"entity_2": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_E2N=$(grep -o '"entity_2_name": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+fi
+
+if [ -z "$HA_URL" ]; then HA_URL="$EXIST_URL"; fi
+if [ -z "$HA_TOKEN" ]; then HA_TOKEN="$EXIST_TOKEN"; fi
+if [ -z "$ENTITY_1" ]; then ENTITY_1="${EXIST_E1:-light.living_room}"; fi
+if [ -z "$ENTITY_1_NAME" ]; then ENTITY_1_NAME="${EXIST_E1N:-ŚWIATŁO}"; fi
+if [ -z "$ENTITY_2" ]; then ENTITY_2="${EXIST_E2:-switch.fan}"; fi
+if [ -z "$ENTITY_2_NAME" ]; then ENTITY_2_NAME="${EXIST_E2N:-WENTYLATOR}"; fi
+
 # Basic validation
 if [ -z "$HA_URL" ] || [ -z "$HA_TOKEN" ]; then
     show_error_page "Błąd Konfiguracji" "Adres URL oraz Token są wymagane."
     exit 0
 fi
 
+# Auto-add http:// if missing
 case "$HA_URL" in
     http://*|https://*) ;;
-    *) 
-        show_error_page "Błędny Adres URL" "Adres URL Home Assistant musi rozpoczynać się od http:// lub https://"
-        exit 0
-        ;;
+    *) HA_URL="http://$HA_URL" ;;
 esac
 
 # Save credentials as JSON config
@@ -123,7 +138,10 @@ EOF
 
 chmod 600 /tuya/data/ha_config.json 2>/dev/null
 
-# Output success page
+# Automatically trigger background restart of ha_panel application
+(sleep 1; killall -9 ha_panel; /tuya/data/ha_panel >/tmp/ha_panel.log 2>&1 &) &
+
+# Output success page with real details
 cat <<EOF
 <!DOCTYPE html>
 <html lang="pl">
@@ -149,21 +167,39 @@ cat <<EOF
             padding: 35px 25px; 
             border-radius: 16px; 
             border: 1px solid #2a2d36;
-            max-width: 440px; 
+            max-width: 460px; 
             width: 100%;
             box-shadow: 0 4px 20px rgba(0,0,0,0.5);
             box-sizing: border-box;
         }
         h1 { color: #4caf50; font-size: 22px; margin-top: 0; }
-        p { color: #b0b0b0; line-height: 1.6; font-size: 14px; }
+        p { color: #b0b0b0; line-height: 1.5; font-size: 14px; margin-bottom: 20px; }
+        .info-list {
+            background: #121318;
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid #2a2d36;
+            text-align: left;
+            margin-bottom: 20px;
+        }
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #20232b;
+            font-size: 13px;
+        }
+        .info-item:last-child { border-bottom: none; }
+        .info-item span { color: #a9a6b0; }
+        .info-item strong { color: #ff9800; word-break: break-all; text-align: right; max-width: 60%; }
         .countdown-box {
             background: #282b34;
             padding: 12px;
             border-radius: 8px;
-            margin: 20px 0;
+            margin: 15px 0;
             font-weight: bold;
-            color: #ff9800;
-            font-size: 15px;
+            color: #03a9f4;
+            font-size: 14px;
         }
         .btn-home {
             display: inline-block;
@@ -185,13 +221,17 @@ cat <<EOF
 <body>
     <div class="card">
         <h1>✅ Konfiguracja Zapisana!</h1>
-        <p>Dane logowania do Home Assistant zostały pomyślnie zapisane w pamięci trwałej panelu.</p>
+        <p>Aplikacja panelu została zrestartowana i ładuje połączenie z Home Assistant.</p>
         
-        <div class="countdown-box">
-            🔄 Panel załaduje pulpit w ciągu: <span id="cnt">3</span> s
+        <div class="info-list">
+            <div class="info-item"><span>Serwer HA:</span> <strong>$HA_URL</strong></div>
+            <div class="info-item"><span>Przycisk 1:</span> <strong>$ENTITY_1_NAME ($ENTITY_1)</strong></div>
+            <div class="info-item"><span>Przycisk 2:</span> <strong>$ENTITY_2_NAME ($ENTITY_2)</strong></div>
         </div>
 
-        <p>Ekran urządzenia automatycznie przełączy się na główny pulpit sterowania.</p>
+        <div class="countdown-box">
+            🔄 Restart aplikacji w toku. Ładowanie pulpitu za: <span id="cnt">3</span> s
+        </div>
         
         <a href="/" class="btn-home">⬅️ Powrót do Strony Główny</a>
     </div>
