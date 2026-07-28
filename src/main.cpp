@@ -523,15 +523,15 @@ static void ota_msgbox_cb(lv_event_t * e) {
 }
 
 static void show_info_popup(void) {
-    static const char * btns[] = {"ZAMKNIJ", ""};
+    static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
 
     std::string ip = get_wlan0_ip();
     std::stringstream ss;
     ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
-    ss << "\n\nAktualizacje: GitHub";
+    ss << "\n\nAktualizacje: GitHub Releases";
 
     lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "INFORMACJE", ss.str().c_str(), btns, false);
-    lv_obj_add_event_cb(mbox, msgbox_close_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_width(mbox, 360);
     lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
