@@ -8,6 +8,7 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <netdb.h>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -52,6 +53,10 @@ static void screensaver_timer_cb(lv_timer_t * timer) {
 // Global configuration variables
 std::string ha_url = "";
 std::string ha_token = "";
+std::string ha_entity_1 = "";
+std::string ha_entity_2 = "";
+std::string ha_entity_1_name = "ŚWIATŁO";
+std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
@@ -147,8 +152,160 @@ bool load_configuration() {
     
     ha_url = parse_json_value(json, "ha_url");
     ha_token = parse_json_value(json, "ha_token");
+    ha_entity_1 = parse_json_value(json, "entity_1");
+    ha_entity_2 = parse_json_value(json, "entity_2");
+    std::string configured_name_1 = parse_json_value(json, "entity_1_name");
+    std::string configured_name_2 = parse_json_value(json, "entity_2_name");
+    if (!configured_name_1.empty()) ha_entity_1_name = configured_name_1;
+    if (!configured_name_2.empty()) ha_entity_2_name = configured_name_2;
     
-    return !ha_url.empty();
+    return !ha_url.empty() && !ha_token.empty() && !ha_entity_1.empty() && !ha_entity_2.empty();
+}
+
+struct HaControl {
+    std::string entity_id;
+    std::string name;
+    lv_obj_t *button;
+    lv_obj_t *label;
+};
+
+static HaControl ha_controls[2];
+
+static bool parse_ha_url(std::string *host, int *port, std::string *base_path) {
+    const std::string prefix = "http://";
+    if (ha_url.compare(0, prefix.size(), prefix) != 0) return false;
+
+    std::string remainder = ha_url.substr(prefix.size());
+    size_t slash = remainder.find('/');
+    std::string authority = slash == std::string::npos ? remainder : remainder.substr(0, slash);
+    *base_path = slash == std::string::npos ? "" : remainder.substr(slash);
+    while (!base_path->empty() && base_path->back() == '/') base_path->pop_back();
+
+    size_t colon = authority.rfind(':');
+    *host = colon == std::string::npos ? authority : authority.substr(0, colon);
+    *port = colon == std::string::npos ? 80 : atoi(authority.substr(colon + 1).c_str());
+    return !host->empty() && *port > 0 && *port <= 65535;
+}
+
+static bool send_all(int fd, const std::string &data) {
+    size_t sent = 0;
+    while (sent < data.size()) {
+        ssize_t count = send(fd, data.data() + sent, data.size() - sent, 0);
+        if (count <= 0) return false;
+        sent += (size_t)count;
+    }
+    return true;
+}
+
+static bool ha_request(const std::string &method, const std::string &endpoint,
+                       const std::string &body, std::string *response_body) {
+    std::string host;
+    std::string base_path;
+    int port;
+    if (!parse_ha_url(&host, &port, &base_path)) {
+        printf("[HA] Only local http:// URLs are supported by this build.\n");
+        return false;
+    }
+
+    char port_text[8];
+    snprintf(port_text, sizeof(port_text), "%d", port);
+    struct addrinfo hints = {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *addresses = NULL;
+    if (getaddrinfo(host.c_str(), port_text, &hints, &addresses) != 0) return false;
+
+    int fd = -1;
+    for (struct addrinfo *address = addresses; address; address = address->ai_next) {
+        fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        if (fd < 0) continue;
+        struct timeval timeout = {1, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) break;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(addresses);
+    if (fd < 0) return false;
+
+    std::stringstream request;
+    request << method << " " << base_path << endpoint << " HTTP/1.1\r\n";
+    request << "Host: " << host << ":" << port << "\r\n";
+    request << "Authorization: Bearer " << ha_token << "\r\n";
+    request << "Accept: application/json\r\n";
+    request << "Connection: close\r\n";
+    if (!body.empty()) {
+        request << "Content-Type: application/json\r\n";
+        request << "Content-Length: " << body.size() << "\r\n";
+    }
+    request << "\r\n" << body;
+
+    bool sent = send_all(fd, request.str());
+    std::string response;
+    char buffer[4096];
+    ssize_t count;
+    while (sent && (count = recv(fd, buffer, sizeof(buffer), 0)) > 0) {
+        response.append(buffer, (size_t)count);
+    }
+    close(fd);
+    if (!sent) return false;
+
+    int status = 0;
+    sscanf(response.c_str(), "HTTP/%*s %d", &status);
+    size_t separator = response.find("\r\n\r\n");
+    if (response_body) {
+        *response_body = separator == std::string::npos ? "" : response.substr(separator + 4);
+    }
+    return status >= 200 && status < 300;
+}
+
+static void publish_panel_state_to_ha(void) {
+    if (ha_url.empty() || ha_token.empty()) return;
+
+    std::string ip = get_wlan0_ip();
+
+    // 1. Publish binary_sensor.moes_panel_screen (on = active, off = blanked)
+    std::string screen_state = g_screen_blanked ? "off" : "on";
+    std::stringstream screen_body;
+    screen_body << "{\"state\":\"" << screen_state << "\",\"attributes\":{"
+                << "\"friendly_name\":\"MOES Panel - Ekran\","
+                << "\"ip_address\":\"" << ip << "\","
+                << "\"version\":\"" << CURRENT_VERSION << "\"}}";
+    
+    ha_request("POST", "/api/states/binary_sensor.moes_panel_screen", screen_body.str(), NULL);
+
+    // 2. Publish sensor.moes_panel_status (online)
+    std::stringstream status_body;
+    status_body << "{\"state\":\"online\",\"attributes\":{"
+                << "\"friendly_name\":\"MOES Panel - Status\","
+                << "\"ip_address\":\"" << ip << "\","
+                << "\"version\":\"" << CURRENT_VERSION << "\","
+                << "\"screen_timeout_s\":" << (screen_timeout_ms / 1000) << "}}";
+
+    ha_request("POST", "/api/states/sensor.moes_panel_status", status_body.str(), NULL);
+}
+
+static void update_control_state(HaControl *control) {
+    if (!control || !control->button || control->entity_id.empty()) return;
+    std::string response;
+    if (!ha_request("GET", "/api/states/" + control->entity_id, "", &response)) {
+        lv_obj_set_style_bg_color(control->button, lv_color_make(0x66, 0x55, 0x00), LV_PART_MAIN);
+        return;
+    }
+    std::string state = parse_json_value(response, "state");
+    if (state == "on") {
+        lv_obj_add_state(control->button, LV_STATE_CHECKED);
+    } else {
+        lv_obj_clear_state(control->button, LV_STATE_CHECKED);
+    }
+}
+
+static void state_poll_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    update_control_state(&ha_controls[0]);
+    update_control_state(&ha_controls[1]);
+    publish_panel_state_to_ha();
 }
 
 // Perform OTA self-replacement update directly from GitHub Releases API
@@ -224,19 +381,20 @@ bool perform_github_ota() {
 // Event callback for native LVGL buttons
 static void btn_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * btn = lv_event_get_target(e);
-    
-    if (code == LV_EVENT_CLICKED) {
-        bool state = lv_obj_has_state(btn, LV_STATE_CHECKED);
-        
-        if (state) {
-            lv_obj_set_style_bg_color(btn, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN); // Green for ON
-            printf("[HA Click] Light turned ON (REST/Websocket request simulation to %s)!\n", ha_url.c_str());
-        } else {
-            lv_obj_set_style_bg_color(btn, lv_color_make(0xAA, 0x00, 0x00), LV_PART_MAIN); // Red for OFF
-            printf("[HA Click] Light turned OFF (REST/Websocket request simulation to %s)!\n", ha_url.c_str());
-        }
+    if (code != LV_EVENT_CLICKED) return;
+
+    HaControl *control = (HaControl *)lv_event_get_user_data(e);
+    if (!control || control->entity_id.empty()) return;
+    size_t dot = control->entity_id.find('.');
+    if (dot == std::string::npos) return;
+    std::string domain = control->entity_id.substr(0, dot);
+    if (domain != "light" && domain != "fan" && domain != "switch" && domain != "input_boolean") return;
+
+    std::string body = "{\"entity_id\":\"" + control->entity_id + "\"}";
+    if (!ha_request("POST", "/api/services/" + domain + "/toggle", body, NULL)) {
+        printf("[HA] Toggle failed for %s.\n", control->entity_id.c_str());
     }
+    update_control_state(control);
 }
 
 static void msgbox_close_cb(lv_event_t * e) {
@@ -286,7 +444,7 @@ static void ota_msgbox_cb(lv_event_t * e) {
 }
 
 static void show_info_popup(void) {
-    static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
+    static const char * btns[] = {"ZAMKNIJ", ""};
 
     std::string ip = get_wlan0_ip();
     std::stringstream ss;
@@ -294,7 +452,7 @@ static void show_info_popup(void) {
     ss << "\n\nAktualizacje: GitHub";
 
     lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "INFORMACJE", ss.str().c_str(), btns, false);
-    lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(mbox, msgbox_close_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_width(mbox, 360);
     lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
@@ -564,6 +722,9 @@ static void create_settings_screen(void) {
                            httpd_active ? "Włączony (port 80)" : "Wyłączony",
                            httpd_active,
                            web_portal_switch_event_cb);
+
+    add_settings_card(list, &y, ICON_PLUG, lv_color_make(0x00, 0x89, 0x7B),
+                      "MQTT", "Planowane - Integracja dwukierunkowa", SETTINGS_ACTION_NONE);
 
     add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
                       "Asystent głosowy", "HA Assist / Wyoming - planowane", SETTINGS_ACTION_NONE);
@@ -836,14 +997,13 @@ void create_home_assistant_ui(void) {
     lv_obj_t * btn1 = lv_btn_create(scr);
     lv_obj_set_size(btn1, 220, 75);
     lv_obj_align(btn1, LV_ALIGN_CENTER, 0, 45);
-    lv_obj_add_event_cb(btn1, btn_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(btn1, LV_OBJ_FLAG_CHECKABLE);
     lv_obj_set_style_bg_color(btn1, lv_color_make(0xAA, 0x00, 0x00), LV_PART_MAIN); // Initial OFF (Red)
     lv_obj_set_style_bg_color(btn1, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_radius(btn1, 37, LV_PART_MAIN);
 
     lv_obj_t * label1 = lv_label_create(btn1);
-    lv_label_set_text(label1, "ŻARÓWKA / SUFIT");
+    lv_label_set_text(label1, ha_entity_1_name.c_str());
     lv_obj_set_style_text_color(label1, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(label1, LV_ALIGN_CENTER, 0, 0);
 
@@ -851,16 +1011,29 @@ void create_home_assistant_ui(void) {
     lv_obj_t * btn2 = lv_btn_create(scr);
     lv_obj_set_size(btn2, 220, 55);
     lv_obj_align(btn2, LV_ALIGN_BOTTOM_MID, 0, -45);
-    lv_obj_add_event_cb(btn2, btn_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(btn2, LV_OBJ_FLAG_CHECKABLE);
     lv_obj_set_style_bg_color(btn2, lv_color_make(0xAA, 0x00, 0x00), LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn2, lv_color_make(0x00, 0xAA, 0x00), LV_PART_MAIN | LV_STATE_CHECKED);
     lv_obj_set_style_radius(btn2, 27, LV_PART_MAIN);
 
     lv_obj_t * label2 = lv_label_create(btn2);
-    lv_label_set_text(label2, "WENTYLATOR / NAWIEW");
+    lv_label_set_text(label2, ha_entity_2_name.c_str());
     lv_obj_set_style_text_color(label2, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(label2, LV_ALIGN_CENTER, 0, 0);
+
+    ha_controls[0].entity_id = ha_entity_1;
+    ha_controls[0].name = ha_entity_1_name;
+    ha_controls[0].button = btn1;
+    ha_controls[0].label = label1;
+    ha_controls[1].entity_id = ha_entity_2;
+    ha_controls[1].name = ha_entity_2_name;
+    ha_controls[1].button = btn2;
+    ha_controls[1].label = label2;
+    lv_obj_add_event_cb(btn1, btn_event_cb, LV_EVENT_CLICKED, &ha_controls[0]);
+    lv_obj_add_event_cb(btn2, btn_event_cb, LV_EVENT_CLICKED, &ha_controls[1]);
+    update_control_state(&ha_controls[0]);
+    update_control_state(&ha_controls[1]);
+    lv_timer_create(state_poll_timer_cb, 5000, NULL);
 
     create_control_center(scr);
 }
