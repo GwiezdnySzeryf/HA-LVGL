@@ -138,5 +138,18 @@
             Powered by OpenCode Native C++ & LVGL v8.3
         </div>
     </div>
+    <script>
+        fetch('/cgi-bin/status.sh')
+            .then(res => res.json())
+            .then(data => {
+                if (data.ha_url) document.getElementById('ha_url').value = data.ha_url;
+                if (data.ha_token) document.getElementById('ha_token').value = data.ha_token;
+                if (data.entity_1) document.getElementById('entity_1').value = data.entity_1;
+                if (data.entity_1_name) document.getElementById('entity_1_name').value = data.entity_1_name;
+                if (data.entity_2) document.getElementById('entity_2').value = data.entity_2;
+                if (data.entity_2_name) document.getElementById('entity_2_name').value = data.entity_2_name;
+            })
+            .catch(err => console.error('Status fetch error:', err));
+    </script>
 </body>
 </html>

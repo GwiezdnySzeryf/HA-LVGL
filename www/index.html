@@ -262,6 +262,26 @@
                         <textarea id="ha_token" name="ha_token" placeholder="Wklej token z profilu Home Assistant..." required></textarea>
                     </div>
 
+                    <div class="form-group">
+                        <label for="entity_1">Pierwsza Encja (Światło / Przełącznik)</label>
+                        <input type="text" id="entity_1" name="entity_1" placeholder="light.salon" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="entity_1_name">Nazwa Pierwszego Przycisku</label>
+                        <input type="text" id="entity_1_name" name="entity_1_name" value="ŚWIATŁO" maxlength="24" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="entity_2">Druga Encja (Wentylator / Przełącznik)</label>
+                        <input type="text" id="entity_2" name="entity_2" placeholder="switch.wentylator" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="entity_2_name">Nazwa Drugiego Przycisku</label>
+                        <input type="text" id="entity_2_name" name="entity_2_name" value="WENTYLATOR" maxlength="24" required>
+                    </div>
+
                     <button type="submit">Zapisz i Zrestartuj Panel</button>
                 </form>
             </div>
@@ -387,6 +407,11 @@
                     document.getElementById('stat-ha').innerText = data.ha_configured ? 'Skonfigurowano' : 'Nie połączono';
                     document.getElementById('stat-uptime').innerText = data.uptime || '-';
                     if (data.ha_url) document.getElementById('ha_url').value = data.ha_url;
+                    if (data.ha_token) document.getElementById('ha_token').value = data.ha_token;
+                    if (data.entity_1) document.getElementById('entity_1').value = data.entity_1;
+                    if (data.entity_1_name) document.getElementById('entity_1_name').value = data.entity_1_name;
+                    if (data.entity_2) document.getElementById('entity_2').value = data.entity_2;
+                    if (data.entity_2_name) document.getElementById('entity_2_name').value = data.entity_2_name;
                 })
                 .catch(err => console.error('Status fetch error:', err));
         }

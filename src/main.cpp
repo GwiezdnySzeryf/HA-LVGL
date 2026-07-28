@@ -187,10 +187,17 @@ bool load_configuration() {
     ha_entity_2 = parse_json_value(json, "entity_2");
     std::string configured_name_1 = parse_json_value(json, "entity_1_name");
     std::string configured_name_2 = parse_json_value(json, "entity_2_name");
+
+    while (!ha_url.empty() && (ha_url.back() == ' ' || ha_url.back() == '\r' || ha_url.back() == '\n' || ha_url.back() == '\t')) ha_url.pop_back();
+    while (!ha_token.empty() && (ha_token.back() == ' ' || ha_token.back() == '\r' || ha_token.back() == '\n' || ha_token.back() == '\t')) ha_token.pop_back();
+
+    if (ha_entity_1.empty()) ha_entity_1 = "light.living_room";
+    if (ha_entity_2.empty()) ha_entity_2 = "switch.fan";
+
     if (!configured_name_1.empty()) ha_entity_1_name = configured_name_1;
     if (!configured_name_2.empty()) ha_entity_2_name = configured_name_2;
     
-    return !ha_url.empty() && !ha_token.empty() && !ha_entity_1.empty() && !ha_entity_2.empty();
+    return !ha_url.empty() && !ha_token.empty();
 }
 
 struct HaControl {
@@ -202,85 +209,35 @@ struct HaControl {
 
 static HaControl ha_controls[2];
 
-static bool parse_ha_url(std::string *host, int *port, std::string *base_path) {
-    const std::string prefix = "http://";
-    if (ha_url.compare(0, prefix.size(), prefix) != 0) return false;
-
-    std::string remainder = ha_url.substr(prefix.size());
-    size_t slash = remainder.find('/');
-    std::string authority = slash == std::string::npos ? remainder : remainder.substr(0, slash);
-    *base_path = slash == std::string::npos ? "" : remainder.substr(slash);
-    while (!base_path->empty() && base_path->back() == '/') base_path->pop_back();
-
-    size_t colon = authority.rfind(':');
-    *host = colon == std::string::npos ? authority : authority.substr(0, colon);
-    *port = colon == std::string::npos ? 80 : atoi(authority.substr(colon + 1).c_str());
-    return !host->empty() && *port > 0 && *port <= 65535;
-}
-
-static bool send_all(int fd, const std::string &data) {
-    size_t sent = 0;
-    while (sent < data.size()) {
-        ssize_t count = send(fd, data.data() + sent, data.size() - sent, 0);
-        if (count <= 0) return false;
-        sent += (size_t)count;
-    }
-    return true;
-}
-
 static bool ha_request(const std::string &method, const std::string &endpoint,
                        const std::string &body, std::string *response_body) {
-    std::string host;
-    std::string base_path;
-    int port;
-    if (!parse_ha_url(&host, &port, &base_path)) {
-        printf("[HA] Only local http:// URLs are supported by this build.\n");
-        return false;
-    }
+    std::string url = ha_url;
+    while (!url.empty() && (url.back() == '/' || url.back() == ' ' || url.back() == '\r' || url.back() == '\n')) url.pop_back();
 
-    char port_text[8];
-    snprintf(port_text, sizeof(port_text), "%d", port);
-    struct addrinfo hints = {};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *addresses = NULL;
-    if (getaddrinfo(host.c_str(), port_text, &hints, &addresses) != 0) return false;
+    std::string full_url = url + endpoint;
+    std::string curl_bin = (access("/tuya/data/curl", X_OK) == 0) ? "/tuya/data/curl" : "curl";
 
-    int fd = -1;
-    for (struct addrinfo *address = addresses; address; address = address->ai_next) {
-        fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-        if (fd < 0) continue;
-        struct timeval timeout = {1, 0};
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-        if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(addresses);
-    if (fd < 0) return false;
-
-    std::stringstream request;
-    request << method << " " << base_path << endpoint << " HTTP/1.1\r\n";
-    request << "Host: " << host << ":" << port << "\r\n";
-    request << "Authorization: Bearer " << ha_token << "\r\n";
-    request << "Accept: application/json\r\n";
-    request << "Connection: close\r\n";
+    std::stringstream cmd;
+    cmd << curl_bin << " -s -k -m 5 -i -X " << method;
+    cmd << " -H \"Authorization: Bearer " << ha_token << "\"";
+    cmd << " -H \"Accept: application/json\"";
     if (!body.empty()) {
-        request << "Content-Type: application/json\r\n";
-        request << "Content-Length: " << body.size() << "\r\n";
+        cmd << " -H \"Content-Type: application/json\"";
+        cmd << " -d '" << body << "'";
     }
-    request << "\r\n" << body;
+    cmd << " \"" << full_url << "\" 2>/dev/null";
 
-    bool sent = send_all(fd, request.str());
+    FILE *pipe = popen(cmd.str().c_str(), "r");
+    if (!pipe) return false;
+
     std::string response;
-    char buffer[4096];
-    ssize_t count;
-    while (sent && (count = recv(fd, buffer, sizeof(buffer), 0)) > 0) {
-        response.append(buffer, (size_t)count);
+    char buf[1024];
+    while (fgets(buf, sizeof(buf), pipe) != NULL) {
+        response.append(buf);
     }
-    close(fd);
-    if (!sent) return false;
+    pclose(pipe);
+
+    if (response.empty()) return false;
 
     int status = 0;
     sscanf(response.c_str(), "HTTP/%*s %d", &status);
