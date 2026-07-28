@@ -679,7 +679,27 @@ static void create_settings_screen(void) {
     lv_obj_set_style_pad_all(settings_screen, 0, LV_PART_MAIN);
     lv_obj_clear_flag(settings_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t * back = lv_btn_create(settings_screen);
+    lv_obj_t * list = lv_obj_create(settings_screen);
+    lv_obj_set_size(list, 480, 410);
+    lv_obj_set_pos(list, 0, 70);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t * header_bar = lv_obj_create(settings_screen);
+    lv_obj_set_size(header_bar, 480, 70);
+    lv_obj_set_pos(header_bar, 0, 0);
+    lv_obj_set_style_bg_color(header_bar, lv_color_make(0x11, 0x13, 0x18), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(header_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(header_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(header_bar, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(header_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * back = lv_btn_create(header_bar);
     lv_obj_set_size(back, 48, 48);
     lv_obj_set_pos(back, 12, 11);
     lv_obj_set_style_bg_color(back, lv_color_make(0x2A, 0x2D, 0x35), LV_PART_MAIN);
@@ -693,20 +713,11 @@ static void create_settings_screen(void) {
     lv_obj_set_style_text_color(back_icon, lv_color_white(), LV_PART_MAIN);
     lv_obj_align(back_icon, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t * heading = lv_label_create(settings_screen);
+    lv_obj_t * heading = lv_label_create(header_bar);
     lv_label_set_text(heading, "Ustawienia");
     lv_obj_set_pos(heading, 76, 22);
     lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_set_style_text_color(heading, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
-
-    lv_obj_t * list = lv_obj_create(settings_screen);
-    lv_obj_set_size(list, 480, 410);
-    lv_obj_set_pos(list, 0, 70);
-    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(list, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
     int y = 8;

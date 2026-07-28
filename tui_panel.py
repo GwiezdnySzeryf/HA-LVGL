@@ -22,41 +22,26 @@ C_CYAN = "\033[36m"
 C_BG_DARK = "\033[40m"
 
 SERIAL = "100211471004F0"
-DEFAULT_IP = "192.168.1.111"
+DEFAULT_IP = "192.168.1.140"
 
 def discover_panel_ip():
     global DEFAULT_IP
-    for test_ip in [DEFAULT_IP, "192.168.1.140", "192.168.1.111"]:
+    for test_ip in ["192.168.1.140", DEFAULT_IP, "192.168.1.111"]:
         try:
             s = socket.socket()
-            s.settimeout(0.2)
+            s.settimeout(0.3)
             s.connect((test_ip, 23))
+            s.sendall(b"echo PANEL_CHECK\n")
+            time.sleep(0.15)
+            res = s.recv(1024).decode(errors="ignore")
             s.close()
-            DEFAULT_IP = test_ip
-            return test_ip
+            if "PANEL_CHECK" in res:
+                DEFAULT_IP = test_ip
+                return test_ip
         except Exception:
             pass
 
-    import concurrent.futures
-    def check_ip(i):
-        ip = f"192.168.1.{i}"
-        try:
-            s = socket.socket()
-            s.settimeout(0.2)
-            s.connect((ip, 23))
-            s.close()
-            return ip
-        except Exception:
-            return None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
-        found = [r for r in ex.map(check_ip, range(1, 255)) if r]
-
-    if found:
-        DEFAULT_IP = found[0]
-        return found[0]
-
-    return DEFAULT_IP
+    return "192.168.1.140"
 
 def clear_screen():
     os.system("clear" if os.name != "nt" else "cls")
@@ -278,11 +263,12 @@ def capture_screenshot():
     print(f"\n{C_YELLOW}Pobieranie zrzutu ekranu /dev/fb0 z panelu...{C_RESET}")
     raw_path = "/tmp/panel_fb0.raw"
     raw_data = None
+    ip = discover_panel_ip()
 
     # Try HTTP CGI endpoint first
     try:
         import urllib.request
-        with urllib.request.urlopen(f"http://{DEFAULT_IP}/cgi-bin/screenshot.sh", timeout=5) as resp:
+        with urllib.request.urlopen(f"http://{ip}/cgi-bin/screenshot.sh", timeout=5) as resp:
             raw_data = resp.read()
     except Exception:
         pass
@@ -300,9 +286,9 @@ def capture_screenshot():
 
         png_path = "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/screenshots/screenshot_latest.png"
         os.makedirs(os.path.dirname(png_path), exist_ok=True)
-        # Convert raw BGRA 480x480 to PNG using ffmpeg
+        # Convert raw BGR0 480x480 to PNG using ffmpeg (bgr0 ignores 4th byte alpha channel)
         subprocess.run([
-            "ffmpeg", "-y", "-f", "rawvideo", "-pixel_format", "bgra",
+            "ffmpeg", "-y", "-f", "rawvideo", "-pixel_format", "bgr0",
             "-video_size", "480x480", "-i", raw_path, png_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"{C_GREEN}Zapisano zrzut ekranu: {png_path}{C_RESET}")
