@@ -101,16 +101,33 @@ std::string get_wlan0_ip() {
     std::string ip = "127.0.0.1";
 
     if (getifaddrs(&ifaddr) == 0) {
+        // Pass 1: Look specifically for wlan0 with valid IPv4
         for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-            if (ifa->ifa_addr == NULL) continue;
-            if (ifa->ifa_addr->sa_family == AF_INET) {
-                std::string if_name = ifa->ifa_name;
-                if (if_name != "lo") {
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+            std::string if_name = ifa->ifa_name;
+            if (if_name == "wlan0") {
+                struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+                if (sa->sin_addr.s_addr != htonl(INADDR_LOOPBACK) && sa->sin_addr.s_addr != 0) {
                     char host[INET_ADDRSTRLEN];
-                    struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
                     inet_ntop(AF_INET, &(sa->sin_addr), host, INET_ADDRSTRLEN);
                     ip = host;
-                    if (if_name == "wlan0") break; // Prefer wlan0
+                    freeifaddrs(ifaddr);
+                    return ip;
+                }
+            }
+        }
+
+        // Pass 2: Fallback to any non-loopback IPv4 interface
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+            std::string if_name = ifa->ifa_name;
+            if (if_name != "lo") {
+                struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+                if (sa->sin_addr.s_addr != htonl(INADDR_LOOPBACK) && sa->sin_addr.s_addr != 0) {
+                    char host[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &(sa->sin_addr), host, INET_ADDRSTRLEN);
+                    ip = host;
+                    break;
                 }
             }
         }
