@@ -73,10 +73,14 @@ static uint32_t control_center_drag_last_time = 0;
 static int control_center_drag_velocity = 0;
 static int backlight_max = 255;
 static lv_obj_t * settings_screen = NULL;
+static lv_obj_t * updates_screen = NULL;
+static lv_obj_t * diagnostics_screen = NULL;
+static lv_obj_t * info_screen = NULL;
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
 LV_FONT_DECLARE(lv_font_control_icons_24);
+LV_FONT_DECLARE(lv_font_montserrat_16_pl);
 
 #define ICON_BRIGHTNESS "\xEF\x86\x85"
 #define ICON_VOLUME     "\xEF\x80\xA8"
@@ -490,71 +494,43 @@ static void ota_update_timer_cb(lv_timer_t * timer) {
     }
 }
 
-// Event callback for the Update modal buttons
-static void ota_msgbox_cb(lv_event_t * e) {
-    lv_obj_t * obj = lv_event_get_current_target(e);
-    uint16_t btn_id = lv_msgbox_get_active_btn(obj);
-    
-    if (btn_id == 0) { // "AKTUALIZUJ" (Update)
-        printf("[OTA Click] Triggering OTA update...\n");
-        lv_msgbox_close(obj);
-        
-        // Show temporary download modal on screen with progress bar
-        lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "AKTUALIZACJA", "Łączenie z GitHubem...\n0%", NULL, false);
-        lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_width(mbox, 360);
-        lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
-        lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
-        lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
-
-        lv_obj_t * bar = lv_bar_create(mbox);
-        lv_obj_set_size(bar, 300, 16);
-        lv_bar_set_range(bar, 0, 100);
-        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(bar, lv_color_make(0x4A, 0x4E, 0x59), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(bar, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_INDICATOR);
-        lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -10);
-
-        OtaModalData * data = new OtaModalData{mbox, bar};
-        lv_timer_create(ota_update_timer_cb, 150, data);
-    } else { // "ZAMKNIJ" (Close)
-        lv_msgbox_close(obj);
-    }
-}
-
-static void show_info_popup(void) {
-    static const char * btns[] = {"AKTUALIZUJ", "ZAMKNIJ", ""};
-
-    std::string ip = get_wlan0_ip();
-    std::stringstream ss;
-    ss << "Wersja: " << CURRENT_VERSION << "\nAdres IP: " << ip;
-    ss << "\n\nAktualizacje: GitHub Releases";
-
-    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "INFORMACJE", ss.str().c_str(), btns, false);
-    lv_obj_add_event_cb(mbox, ota_msgbox_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_width(mbox, 360);
-    lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
-    lv_obj_set_width(lv_msgbox_get_btns(mbox), 320);
-    lv_obj_set_style_pad_row(lv_msgbox_get_content(mbox), 10, LV_PART_MAIN);
-}
-
-// Event callback for the Info button "?"
-static void info_btn_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) show_info_popup();
-}
-
 enum settings_action_t {
     SETTINGS_ACTION_NONE = 0,
     SETTINGS_ACTION_CONTROLS,
     SETTINGS_ACTION_DIAGNOSTICS,
-    SETTINGS_ACTION_INFO
+    SETTINGS_ACTION_INFO,
+    SETTINGS_ACTION_UPDATES
 };
 
+static void create_updates_screen(void);
+static void create_diagnostics_screen(void);
+static void create_info_screen(void);
+
+static void close_updates_screen(void) {
+    if (updates_screen) {
+        lv_obj_del_async(updates_screen);
+        updates_screen = NULL;
+    }
+}
+
+static void close_diagnostics_screen(void) {
+    if (diagnostics_screen) {
+        lv_obj_del_async(diagnostics_screen);
+        diagnostics_screen = NULL;
+    }
+}
+
+static void close_info_screen(void) {
+    if (info_screen) {
+        lv_obj_del_async(info_screen);
+        info_screen = NULL;
+    }
+}
+
 static void close_settings(void) {
+    close_updates_screen();
+    close_diagnostics_screen();
+    close_info_screen();
     if (!settings_screen) return;
     lv_obj_del_async(settings_screen);
     settings_screen = NULL;
@@ -564,23 +540,9 @@ static void settings_back_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_settings();
 }
 
-static void show_diagnostics_popup(void) {
-    static const char * buttons[] = {"ZAMKNIJ", ""};
-    std::string ip = get_wlan0_ip();
-    std::stringstream ss;
-    ss << "Aplikacja: aktywna\nSieć: ";
-    ss << (ip == "127.0.0.1" ? "brak połączenia" : ip);
-    ss << "\nHome Assistant: ";
-    ss << (config_exists() ? "skonfigurowany" : "nieskonfigurowany");
-
-    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "DIAGNOSTYKA", ss.str().c_str(), buttons, false);
-    lv_obj_add_event_cb(mbox, msgbox_close_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_width(mbox, 360);
-    lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_color(lv_msgbox_get_btns(mbox), lv_color_make(0x20, 0x20, 0x20), LV_PART_ITEMS);
+// Event callback for the Info button "?"
+static void info_btn_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) create_info_screen();
 }
 
 static void settings_card_event_cb(lv_event_t * e) {
@@ -591,9 +553,11 @@ static void settings_card_event_cb(lv_event_t * e) {
         close_settings();
         lv_obj_set_y(control_center, 0);
     } else if (action == SETTINGS_ACTION_DIAGNOSTICS) {
-        show_diagnostics_popup();
+        create_diagnostics_screen();
     } else if (action == SETTINGS_ACTION_INFO) {
-        show_info_popup();
+        create_info_screen();
+    } else if (action == SETTINGS_ACTION_UPDATES) {
+        create_updates_screen();
     }
 }
 
@@ -654,6 +618,212 @@ static void add_settings_card(lv_obj_t * list, int * y, const char * icon_symbol
     }
 
     *y += 88;
+}
+
+static lv_obj_t * create_subscreen_base(const char * title, lv_event_cb_t back_cb, lv_obj_t ** list_out) {
+    lv_obj_t * scr = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(scr, 480, 480);
+    lv_obj_set_pos(scr, 0, 0);
+    lv_obj_set_style_bg_color(scr, lv_color_make(0x11, 0x13, 0x18), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(scr, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(scr, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * list = lv_obj_create(scr);
+    lv_obj_set_size(list, 480, 410);
+    lv_obj_set_pos(list, 0, 70);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t * header_bar = lv_obj_create(scr);
+    lv_obj_set_size(header_bar, 480, 70);
+    lv_obj_set_pos(header_bar, 0, 0);
+    lv_obj_set_style_bg_color(header_bar, lv_color_make(0x11, 0x13, 0x18), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(header_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(header_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(header_bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(header_bar, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(header_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * back = lv_btn_create(header_bar);
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_pos(back, 12, 11);
+    lv_obj_set_style_bg_color(back, lv_color_make(0x2A, 0x2D, 0x35), LV_PART_MAIN);
+    lv_obj_set_style_radius(back, 24, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(back, 0, LV_PART_MAIN);
+    if (back_cb) lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * back_icon = lv_label_create(back);
+    lv_label_set_text(back_icon, ICON_BACK);
+    lv_obj_set_style_text_font(back_icon, &lv_font_control_icons_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(back_icon, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(back_icon, LV_ALIGN_CENTER, 0, 0);
+
+    lv_obj_t * heading = lv_label_create(header_bar);
+    lv_label_set_text(heading, title);
+    lv_obj_set_pos(heading, 76, 22);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_color(heading, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
+
+    if (list_out) *list_out = list;
+    return scr;
+}
+
+static void updates_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_updates_screen();
+}
+
+static void start_ota_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top(), "AKTUALIZACJA", "Łączenie z GitHubem...\n0%", NULL, false);
+    lv_obj_align(mbox, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_width(mbox, 360);
+    lv_obj_set_style_bg_color(mbox, lv_color_make(0x2D, 0x2D, 0x2D), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_title(mbox), lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+    lv_obj_set_style_text_color(lv_msgbox_get_text(mbox), lv_color_white(), LV_PART_MAIN);
+
+    lv_obj_t * bar = lv_bar_create(mbox);
+    lv_obj_set_size(bar, 300, 16);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar, lv_color_make(0x4A, 0x4E, 0x59), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_INDICATOR);
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    OtaModalData * data = new OtaModalData{mbox, bar};
+    lv_timer_create(ota_update_timer_cb, 150, data);
+}
+
+static void create_updates_screen(void) {
+    if (updates_screen) return;
+
+    lv_obj_t * list = NULL;
+    updates_screen = create_subscreen_base("Aktualizacje", updates_back_event_cb, &list);
+
+    int y = 8;
+    std::string ip = get_wlan0_ip();
+    std::string net_status = (ip == "127.0.0.1" ? "Brak połączenia z siecią" : "Połączono - " + ip);
+
+    add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
+                      "Aktualna wersja", CURRENT_VERSION, SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x03, 0x78, 0xA6),
+                      "Kanał wydań", "GitHub: GwiezdnySzeryf/HA-LVGL", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x18, 0x65, 0xA8),
+                      "Stan połączenia", net_status.c_str(), SETTINGS_ACTION_NONE);
+
+    lv_obj_t * btn = lv_btn_create(list);
+    lv_obj_set_size(btn, 424, 54);
+    lv_obj_set_pos(btn, 28, y + 10);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x02, 0x88, 0xD1), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 20, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn, start_ota_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * btn_label = lv_label_create(btn);
+    lv_label_set_text(btn_label, "SPRAWDŹ I AKTUALIZUJ");
+    lv_obj_set_style_text_color(btn_label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(btn_label, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_align(btn_label, LV_ALIGN_CENTER, 0, 0);
+
+    y += 80;
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, y);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
+
+static void diagnostics_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_diagnostics_screen();
+}
+
+static void refresh_diagnostics_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    close_diagnostics_screen();
+    create_diagnostics_screen();
+}
+
+static void create_diagnostics_screen(void) {
+    if (diagnostics_screen) return;
+
+    lv_obj_t * list = NULL;
+    diagnostics_screen = create_subscreen_base("Diagnostyka", diagnostics_back_event_cb, &list);
+
+    int y = 8;
+    std::string ip = get_wlan0_ip();
+    std::string net_status = (ip == "127.0.0.1" ? "Brak połączenia" : "Połączono (" + ip + ")");
+    std::string ha_status = config_exists() ? ("Skonfigurowano: " + (ha_url.empty() ? "brak URL" : ha_url)) : "Nieskonfigurowany";
+    bool httpd_active = (system("pidof httpd >/dev/null") == 0);
+
+    add_settings_card(list, &y, ICON_TOOLS, lv_color_make(0x5C, 0x60, 0x6A),
+                      "Aplikacja", "Status: Aktywna (C++ / LVGL)", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x18, 0x65, 0xA8),
+                      "Sieć i IP", net_status.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_HOME, lv_color_make(0x03, 0x78, 0xA6),
+                      "Home Assistant", ha_status.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
+                      "Portal HTTP WWW", httpd_active ? "Włączony (port 80)" : "Wyłączony", SETTINGS_ACTION_NONE);
+
+    lv_obj_t * btn = lv_btn_create(list);
+    lv_obj_set_size(btn, 424, 54);
+    lv_obj_set_pos(btn, 28, y + 10);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x2A, 0x2E, 0x38), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x3B, 0x40, 0x4E), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 20, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
+    lv_obj_add_event_cb(btn, refresh_diagnostics_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * btn_label = lv_label_create(btn);
+    lv_label_set_text(btn_label, "ODŚWIEŻ DIAGNOSTYKĘ");
+    lv_obj_set_style_text_color(btn_label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(btn_label, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_align(btn_label, LV_ALIGN_CENTER, 0, 0);
+
+    y += 80;
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, y);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
+
+static void info_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_info_screen();
+}
+
+static void create_info_screen(void) {
+    if (info_screen) return;
+
+    lv_obj_t * list = NULL;
+    info_screen = create_subscreen_base("Informacje", info_back_event_cb, &list);
+
+    int y = 8;
+    std::string ip = get_wlan0_ip();
+
+    add_settings_card(list, &y, ICON_INFO, lv_color_make(0x18, 0x65, 0xA8),
+                      "Model panelu", "Smart Home Panel TPP01-Z (4\")", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
+                      "Wersja oprogramowania", CURRENT_VERSION, SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x4F, 0x5D, 0xB8),
+                      "Adres IP", ip.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),
+                      "Silnik graficzny", "LVGL v8.3.11 Framebuffer", SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x03, 0x78, 0xA6),
+                      "Projekt & Kod", "GitHub: GwiezdnySzeryf / HA-LVGL", SETTINGS_ACTION_NONE);
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, y);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
 }
 
 static void web_portal_switch_event_cb(lv_event_t * e) {
@@ -822,7 +992,7 @@ static void create_settings_screen(void) {
 
     add_settings_section(list, "SYSTEM", &y);
     add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
-                      "Aktualizacje", CURRENT_VERSION, SETTINGS_ACTION_INFO);
+                      "Aktualizacje", CURRENT_VERSION, SETTINGS_ACTION_UPDATES);
     add_settings_card(list, &y, ICON_TOOLS, lv_color_make(0x5C, 0x60, 0x6A),
                       "Diagnostyka", "Stan urządzenia", SETTINGS_ACTION_DIAGNOSTICS);
     add_settings_card(list, &y, ICON_INFO, lv_color_make(0x18, 0x65, 0xA8),
