@@ -156,8 +156,27 @@ void hal_wake_screen(void) {
     if (g_screen_blanked) {
         g_screen_blanked = false;
         g_last_wake_time = custom_tick_get();
-        printf("[HAL %u ms] Screen woken up from blanked state.\n", g_last_wake_time);
-        hal_set_backlight(g_active_backlight_raw);
+        printf("[HAL %u ms] Screen waking up with smooth fade...\n", g_last_wake_time);
+
+        int target_val = g_active_backlight_raw;
+        int steps = 15;
+        int step_delay_us = 10000; // 10ms per step = 150ms fade up
+
+        for (int i = 1; i <= steps; i++) {
+            if (g_screen_blanked) break; // Interrupted by re-blank
+            int val = target_val * i / steps;
+            if (val > target_val) val = target_val;
+
+#ifndef PC_SIMULATOR
+            FILE * f = fopen("/sys/class/backlight/backlight/brightness", "w");
+            if (f) {
+                fprintf(f, "%d\n", val);
+                fclose(f);
+            }
+#endif
+            usleep(step_delay_us);
+        }
+
         lv_disp_trig_activity(NULL);
     }
 }
@@ -165,8 +184,37 @@ void hal_wake_screen(void) {
 void hal_blank_screen(void) {
     if (!g_screen_blanked) {
         g_screen_blanked = true;
-        printf("[HAL %u ms] Screen blanked requested.\n", custom_tick_get());
-        hal_set_backlight(0);
+        printf("[HAL %u ms] Screen blanking with smooth fade...\n", custom_tick_get());
+
+        int start_val = g_active_backlight_raw;
+        int steps = 20;
+        int step_delay_us = 20000; // 20ms per step = 400ms fade down
+
+        for (int i = 1; i <= steps; i++) {
+            if (!g_screen_blanked) break; // Interrupted by wake
+            int val = start_val - (start_val * i / steps);
+            if (val < 0) val = 0;
+
+#ifndef PC_SIMULATOR
+            FILE * f = fopen("/sys/class/backlight/backlight/brightness", "w");
+            if (f) {
+                fprintf(f, "%d\n", val);
+                fclose(f);
+            }
+#endif
+            usleep(step_delay_us);
+        }
+
+        if (g_screen_blanked) {
+#ifndef PC_SIMULATOR
+            FILE * f = fopen("/sys/class/backlight/backlight/brightness", "w");
+            if (f) {
+                fprintf(f, "0\n");
+                fclose(f);
+            }
+#endif
+            printf("[HAL %u ms] Fade out complete. Backlight off.\n", custom_tick_get());
+        }
     }
 }
 

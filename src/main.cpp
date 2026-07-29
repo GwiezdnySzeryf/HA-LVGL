@@ -333,8 +333,8 @@ static std::string ws_encode_frame(const std::string &message) {
 
 static bool parse_ha_url_components(std::string *host, int *port, std::string *base_path) {
     std::string url = ha_url;
-    while (!url.empty() && (url.back() == ' ' || url.back() == '\r' || url.back() == '\n' || url.back() == '\t')) url.pop_back();
-    while (!url.empty() && (url.front() == ' ' || url.front() == '\t')) url.erase(0, 1);
+    while (!url.empty() && ((uint8_t)url.back() <= 32)) url.pop_back();
+    while (!url.empty() && ((uint8_t)url.front() <= 32)) url.erase(0, 1);
 
     if (url.empty()) return false;
 
@@ -352,6 +352,10 @@ static bool parse_ha_url_components(std::string *host, int *port, std::string *b
     size_t colon = authority.rfind(':');
     *host = colon == std::string::npos ? authority : authority.substr(0, colon);
     *port = colon == std::string::npos ? 8123 : atoi(authority.substr(colon + 1).c_str());
+
+    while (!host->empty() && ((uint8_t)host->back() <= 32)) host->pop_back();
+    while (!host->empty() && ((uint8_t)host->front() <= 32)) host->erase(0, 1);
+
     return !host->empty() && *port > 0 && *port <= 65535;
 }
 
@@ -409,6 +413,42 @@ static void ws_send_frame_mbed(mbedtls_ssl_context *ssl, const std::string &mess
     mbedtls_ssl_write(ssl, (const unsigned char *)frame.data(), frame.size());
 }
 
+static int connect_socket_mbed(const std::string &host, int port, mbedtls_net_context *net_ctx) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in sa = {};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, host.c_str(), &sa.sin_addr) <= 0) {
+        struct addrinfo hints = {}, *res = NULL;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        char port_text[16];
+        snprintf(port_text, sizeof(port_text), "%d", port);
+        if (getaddrinfo(host.c_str(), port_text, &hints, &res) != 0 || !res) {
+            close(fd);
+            return -1;
+        }
+        memcpy(&sa, res->ai_addr, res->ai_addrlen);
+        freeaddrinfo(res);
+    }
+
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        printf("[WebSocket Connect Error] connect to %s:%d failed: errno=%d %s\n", host.c_str(), port, errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    net_ctx->fd = fd;
+    return 0;
+}
+
 static void ws_thread_loop() {
     printf("[WebSocket ⚡] Native MbedTLS thread starting for URL: %s...\n", ha_url.c_str());
     while (ws_thread_running) {
@@ -442,7 +482,7 @@ static void ws_thread_loop() {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
 
-        if (mbedtls_net_connect(&server_fd, host.c_str(), port_str, MBEDTLS_NET_PROTO_TCP) != 0) {
+        if (connect_socket_mbed(host, port, &server_fd) != 0) {
             printf("[WebSocket ❌] TCP Connection to %s:%d failed. Retrying in 3s...\n", host.c_str(), port);
             mbedtls_net_free(&server_fd);
             mbedtls_ssl_free(&ssl);
@@ -510,28 +550,32 @@ static void ws_thread_loop() {
 
                         std::string get_st = "{\"id\":2,\"type\":\"get_states\"}";
                         ws_send_frame_mbed(&ssl, get_st);
-                    } else if (msg.find("state_changed") != std::string::npos || msg.find("entity_id") != std::string::npos) {
-                        for (int i = 0; i < 2; i++) {
-                            if (ha_controls[i].entity_id.empty()) continue;
-                            size_t pos = msg.find(ha_controls[i].entity_id);
-                            if (pos != std::string::npos) {
-                                size_t st_pos = msg.find("\"state\":", pos);
-                                if (st_pos == std::string::npos) st_pos = msg.find("\"state\":");
-                                if (st_pos != std::string::npos) {
-                                    size_t q1 = msg.find("\"", st_pos + 8);
-                                    if (q1 != std::string::npos) {
-                                        size_t q2 = msg.find("\"", q1 + 1);
-                                        if (q2 != std::string::npos) {
-                                            std::string st = msg.substr(q1 + 1, q2 - q1 - 1);
-                                            bool is_on = (st == "on");
-                                            printf("[WebSocket Live Event ⚡] %s -> %s\n", ha_controls[i].entity_id.c_str(), st.c_str());
-                                            lv_async_call(update_control_state_async, new ControlStateAsyncData{&ha_controls[i], is_on});
-                                        }
+            } else if (msg.find("state_changed") != std::string::npos || msg.find("entity_id") != std::string::npos) {
+                size_t new_st_pos = msg.find("\"new_state\"");
+                std::string new_st_json = (new_st_pos != std::string::npos) ? msg.substr(new_st_pos) : msg;
+
+                for (int i = 0; i < 2; i++) {
+                    if (ha_controls[i].entity_id.empty()) continue;
+                    size_t pos = new_st_json.find(ha_controls[i].entity_id);
+                    if (pos != std::string::npos) {
+                        size_t st_pos = new_st_json.find("\"state\":", pos);
+                        if (st_pos != std::string::npos) {
+                            size_t q1 = new_st_json.find("\"", st_pos + 8);
+                            if (q1 != std::string::npos) {
+                                size_t q2 = new_st_json.find("\"", q1 + 1);
+                                if (q2 != std::string::npos) {
+                                    std::string st = new_st_json.substr(q1 + 1, q2 - q1 - 1);
+                                    if (st == "on" || st == "off") {
+                                        bool is_on = (st == "on");
+                                        printf("[WebSocket Live Event ⚡] %s -> %s\n", ha_controls[i].entity_id.c_str(), st.c_str());
+                                        lv_async_call(update_control_state_async, new ControlStateAsyncData{&ha_controls[i], is_on});
                                     }
                                 }
                             }
                         }
                     }
+                }
+            }
                 }
             } else {
                 printf("[WebSocket ❌] HTTP Upgrade failed or rejected by HA.\n");
@@ -702,11 +746,21 @@ static void btn_event_cb(lv_event_t * e) {
     std::string domain = control->entity_id.substr(0, dot);
     if (domain != "light" && domain != "fan" && domain != "switch" && domain != "input_boolean") return;
 
-    std::string body = "{\"entity_id\":\"" + control->entity_id + "\"}";
-    if (!ha_request("POST", "/api/services/" + domain + "/toggle", body, NULL)) {
-        printf("[HA] Toggle failed for %s.\n", control->entity_id.c_str());
+    // 1. Instant local visual feedback
+    if (lv_obj_has_state(control->button, LV_STATE_CHECKED)) {
+        lv_obj_clear_state(control->button, LV_STATE_CHECKED);
+    } else {
+        lv_obj_add_state(control->button, LV_STATE_CHECKED);
     }
-    update_control_state(control);
+
+    // 2. Dispatch service call in background thread (non-blocking)
+    std::string entity_id = control->entity_id;
+    std::thread([domain, entity_id]() {
+        std::string body = "{\"entity_id\":\"" + entity_id + "\"}";
+        if (!ha_request("POST", "/api/services/" + domain + "/toggle", body, NULL)) {
+            printf("[HA] Async toggle failed for %s.\n", entity_id.c_str());
+        }
+    }).detach();
 }
 
 static void msgbox_close_cb(lv_event_t * e) {
