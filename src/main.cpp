@@ -44,6 +44,7 @@ extern "C" uint32_t custom_tick_get(void);
 
 MqttClient g_mqtt_client;
 MqttConfig g_mqtt_config;
+bool g_web_autostart = true;
 
 static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
 
@@ -246,8 +247,10 @@ bool load_configuration() {
 
     g_mqtt_config.discovery = parse_json_bool_value(json, "mqtt_discovery", true);
 
-    printf("[Config] MQTT enabled=%d, host='%s', port=%d, topic='%s'\n",
-           g_mqtt_config.enabled, g_mqtt_config.host.c_str(), g_mqtt_config.port, g_mqtt_config.base_topic.c_str());
+    g_web_autostart = parse_json_bool_value(json, "web_autostart", true);
+
+    printf("[Config] MQTT enabled=%d, host='%s', port=%d, topic='%s', web_autostart=%d\n",
+           g_mqtt_config.enabled, g_mqtt_config.host.c_str(), g_mqtt_config.port, g_mqtt_config.base_topic.c_str(), g_web_autostart);
 
     return !ha_url.empty() && !ha_token.empty();
 }
@@ -269,7 +272,8 @@ void save_configuration() {
       << "  \"mqtt_user\": \"" << g_mqtt_config.username << "\",\n"
       << "  \"mqtt_pass\": \"" << g_mqtt_config.password << "\",\n"
       << "  \"mqtt_topic\": \"" << g_mqtt_config.base_topic << "\",\n"
-      << "  \"mqtt_discovery\": " << (g_mqtt_config.discovery ? "true" : "false") << "\n"
+      << "  \"mqtt_discovery\": " << (g_mqtt_config.discovery ? "true" : "false") << ",\n"
+      << "  \"web_autostart\": " << (g_web_autostart ? "true" : "false") << "\n"
       << "}\n";
     f.close();
     chmod("/tuya/data/ha_config.json", 0600);
@@ -809,14 +813,8 @@ static void btn_event_cb(lv_event_t * e) {
     std::string domain = control->entity_id.substr(0, dot);
     if (domain != "light" && domain != "fan" && domain != "switch" && domain != "input_boolean") return;
 
-    // 1. Instant local visual feedback
-    if (lv_obj_has_state(control->button, LV_STATE_CHECKED)) {
-        lv_obj_clear_state(control->button, LV_STATE_CHECKED);
-    } else {
-        lv_obj_add_state(control->button, LV_STATE_CHECKED);
-    }
-
-    // 2. Dispatch service call in background thread (non-blocking)
+    // LVGL automatically toggles LV_STATE_CHECKED on click for CHECKABLE buttons.
+    // Dispatch service call in background thread (non-blocking)
     std::string entity_id = control->entity_id;
     std::thread([domain, entity_id]() {
         std::string body = "{\"entity_id\":\"" + entity_id + "\"}";
@@ -857,13 +855,16 @@ enum settings_action_t {
     SETTINGS_ACTION_DIAGNOSTICS,
     SETTINGS_ACTION_INFO,
     SETTINGS_ACTION_UPDATES,
-    SETTINGS_ACTION_MQTT
+    SETTINGS_ACTION_MQTT,
+    SETTINGS_ACTION_WEB_PORTAL
 };
 
 static void create_updates_screen(void);
 static void create_diagnostics_screen(void);
 static void create_info_screen(void);
 static void create_mqtt_screen(void);
+static void create_web_portal_screen(void);
+static void close_web_portal_screen(void);
 
 static lv_obj_t * mqtt_screen = NULL;
 static lv_obj_t * mqtt_kb = NULL;
@@ -960,6 +961,7 @@ static void close_settings(void) {
     close_diagnostics_screen();
     close_info_screen();
     close_mqtt_screen();
+    close_web_portal_screen();
     if (!settings_screen) return;
     lv_obj_del_async(settings_screen);
     settings_screen = NULL;
@@ -989,6 +991,8 @@ static void settings_card_event_cb(lv_event_t * e) {
         create_updates_screen();
     } else if (action == SETTINGS_ACTION_MQTT) {
         create_mqtt_screen();
+    } else if (action == SETTINGS_ACTION_WEB_PORTAL) {
+        create_web_portal_screen();
     }
 }
 
@@ -1407,22 +1411,138 @@ static void create_mqtt_screen(void) {
     lv_obj_set_pos(spacer, 0, y);
 }
 
-static void web_portal_switch_event_cb(lv_event_t * e) {
-    lv_obj_t * sw = lv_event_get_target(e);
-    lv_obj_t * subtitle_label = (lv_obj_t *)lv_event_get_user_data(e);
-    bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+static lv_obj_t * web_portal_screen = NULL;
 
+static void close_web_portal_screen(void) {
+    if (web_portal_screen) {
+        lv_obj_del_async(web_portal_screen);
+        web_portal_screen = NULL;
+    }
+}
+
+static void web_portal_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_web_portal_screen();
+}
+
+static void web_portal_manual_sw_cb(lv_event_t * e) {
+    lv_obj_t * sw = lv_event_get_target(e);
+    bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     if (is_on) {
         system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
         system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
         system("httpd -h /tuya/data/www -p 80 &");
-        if (subtitle_label) lv_label_set_text(subtitle_label, "Włączony (port 80)");
-        printf("[Settings] Portal WWW enabled.\n");
+        printf("[WebPortal] Manual HTTP server started.\n");
     } else {
         system("killall -9 httpd 2>/dev/null");
-        if (subtitle_label) lv_label_set_text(subtitle_label, "Wyłączony");
-        printf("[Settings] Portal WWW disabled.\n");
+        printf("[WebPortal] Manual HTTP server stopped.\n");
     }
+}
+
+static void web_portal_autostart_sw_cb(lv_event_t * e) {
+    lv_obj_t * sw = lv_event_get_target(e);
+    g_web_autostart = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    save_configuration();
+    printf("[WebPortal] Auto-start setting saved: %d\n", g_web_autostart);
+}
+
+static void web_portal_restart_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    system("killall -9 httpd 2>/dev/null; iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null; httpd -h /tuya/data/www -p 80 &");
+    printf("[WebPortal] HTTP server restarted.\n");
+}
+
+static void create_web_portal_screen(void) {
+    if (web_portal_screen) return;
+
+    lv_obj_t * list = NULL;
+    web_portal_screen = create_subscreen_base("Portal WWW", web_portal_back_event_cb, &list);
+
+    int y = 10;
+    std::string ip = get_wlan0_ip();
+    bool httpd_active = (system("pidof httpd >/dev/null") == 0);
+
+    // 1. Status Card
+    std::string status_txt = httpd_active ? "Status: WŁĄCZONY (Port 80)" : "Status: WYŁĄCZONY";
+    std::string url_txt = "http://" + ip + "/";
+
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
+                      status_txt.c_str(), url_txt.c_str(), SETTINGS_ACTION_NONE);
+
+    // 2. Switch: Włącz teraz
+    lv_obj_t * card_man = lv_obj_create(list);
+    lv_obj_set_size(card_man, 424, 60);
+    lv_obj_set_pos(card_man, 28, y);
+    lv_obj_set_style_bg_color(card_man, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card_man, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card_man, 14, LV_PART_MAIN);
+
+    lv_obj_t * lbl_man = lv_label_create(card_man);
+    lv_label_set_text(lbl_man, "Serwer WWW teraz (Ręcznie)");
+    lv_obj_set_pos(lbl_man, 16, 18);
+    lv_obj_set_style_text_color(lbl_man, lv_color_white(), LV_PART_MAIN);
+
+    lv_obj_t * sw_man = lv_switch_create(card_man);
+    lv_obj_align(sw_man, LV_ALIGN_RIGHT_MID, -16, 0);
+    if (httpd_active) lv_obj_add_state(sw_man, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw_man, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw_man, web_portal_manual_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    y += 70;
+
+    // 3. Switch: Autostart przy rozruchu
+    lv_obj_t * card_auto = lv_obj_create(list);
+    lv_obj_set_size(card_auto, 424, 60);
+    lv_obj_set_pos(card_auto, 28, y);
+    lv_obj_set_style_bg_color(card_auto, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card_auto, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card_auto, 14, LV_PART_MAIN);
+
+    lv_obj_t * lbl_auto = lv_label_create(card_auto);
+    lv_label_set_text(lbl_auto, "Uruchamiaj przy starcie panelu");
+    lv_obj_set_pos(lbl_auto, 16, 18);
+    lv_obj_set_style_text_color(lbl_auto, lv_color_white(), LV_PART_MAIN);
+
+    lv_obj_t * sw_auto = lv_switch_create(card_auto);
+    lv_obj_align(sw_auto, LV_ALIGN_RIGHT_MID, -16, 0);
+    if (g_web_autostart) lv_obj_add_state(sw_auto, LV_STATE_CHECKED);
+    else lv_obj_clear_state(sw_auto, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw_auto, web_portal_autostart_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    y += 75;
+
+    // 4. QR Code Card
+    lv_obj_t * lbl_qr = lv_label_create(list);
+    lv_label_set_text(lbl_qr, "Zeskanuj kod QR aby otworzyć panel WWW:");
+    lv_obj_set_pos(lbl_qr, 32, y);
+    lv_obj_set_style_text_color(lbl_qr, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 26;
+
+    lv_obj_t * qr = lv_qrcode_create(list, 150, lv_color_make(0, 0, 0), lv_color_make(255, 255, 255));
+    std::string qr_url = "http://" + ip + "/";
+    lv_qrcode_update(qr, qr_url.c_str(), qr_url.length());
+    lv_obj_set_pos(qr, 165, y);
+
+    y += 165;
+
+    // 5. Restart HTTP Server Button
+    lv_obj_t * rst_btn = lv_btn_create(list);
+    lv_obj_set_size(rst_btn, 416, 44);
+    lv_obj_set_pos(rst_btn, 32, y);
+    lv_obj_set_style_bg_color(rst_btn, lv_color_make(0x00, 0x68, 0x74), LV_PART_MAIN);
+    lv_obj_set_style_radius(rst_btn, 12, LV_PART_MAIN);
+    lv_obj_add_event_cb(rst_btn, web_portal_restart_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * rst_lbl = lv_label_create(rst_btn);
+    lv_label_set_text(rst_lbl, "ZRESTARTUJ SERWER HTTP");
+    lv_obj_set_style_text_font(rst_lbl, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(rst_lbl, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(rst_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    y += 60;
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, y);
 }
 
 static void add_settings_card_switch(lv_obj_t * list, int * y, const char * icon_symbol,
@@ -1559,14 +1679,13 @@ static void create_settings_screen(void) {
                       "Połączenie", ha_status.c_str(), SETTINGS_ACTION_NONE);
 
     bool httpd_active = (system("pidof httpd >/dev/null") == 0);
-    add_settings_card_switch(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
-                           "Portal WWW",
-                           httpd_active ? "Włączony (port 80)" : "Wyłączony",
-                           httpd_active,
-                           web_portal_switch_event_cb);
+    std::string web_status = httpd_active ? (g_web_autostart ? "Włączony (Autostart)" : "Włączony (Ręcznie)") : "Wyłączony";
+    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
+                      "Portal WWW", web_status.c_str(), SETTINGS_ACTION_WEB_PORTAL);
 
+    std::string mqtt_status = g_mqtt_config.enabled ? (g_mqtt_client.is_connected() ? "Połączono (" + g_mqtt_config.host + ")" : "Włączono (" + g_mqtt_config.host + ")") : "Wyłączony";
     add_settings_card(list, &y, ICON_PLUG, lv_color_make(0x00, 0x89, 0x7B),
-                      "MQTT", "Planowane - Integracja dwukierunkowa", SETTINGS_ACTION_NONE);
+                      "MQTT", mqtt_status.c_str(), SETTINGS_ACTION_MQTT);
 
     add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
                       "Asystent głosowy", "HA Assist / Wyoming - planowane", SETTINGS_ACTION_NONE);
@@ -1987,6 +2106,12 @@ int main(void) {
     } else {
         printf("[Onboarding] Configuration file exists. Loading active dashboard...\n");
         if (load_configuration()) {
+            if (g_web_autostart) {
+                system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
+                system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
+                system("httpd -h /tuya/data/www -p 80 &");
+                printf("[WebPortal] Auto-started HTTP server on port 80.\n");
+            }
             create_home_assistant_ui();
         } else {
             // Bad config file formatting, force onboarding

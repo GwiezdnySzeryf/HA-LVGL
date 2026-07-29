@@ -146,24 +146,34 @@ if [ -z "$ENTITY_1_NAME" ]; then ENTITY_1_NAME="${EXIST_E1N:-ŚWIATŁO}"; fi
 if [ -z "$ENTITY_2" ]; then ENTITY_2="${EXIST_E2:-switch.fan}"; fi
 if [ -z "$ENTITY_2_NAME" ]; then ENTITY_2_NAME="${EXIST_E2N:-WENTYLATOR}"; fi
 
-case "$MQTT_ENABLED" in
-    "true"|"1"|"on"|"ON") MQTT_EN_BOOL="true" ;;
-    "false"|"0"|"off"|"OFF") MQTT_EN_BOOL="false" ;;
-    *)
-        if [ -n "$EXIST_M_EN" ]; then MQTT_EN_BOOL="$EXIST_M_EN"; else MQTT_EN_BOOL="false"; fi
+case "$POST_DATA" in
+    *mqtt_host=*|*mqtt_submitted=*)
+        case "$MQTT_ENABLED" in
+            "true"|"1"|"on"|"ON") MQTT_EN_BOOL="true" ;;
+            *) MQTT_EN_BOOL="false" ;;
+        esac
+
+        case "$MQTT_DISCOVERY" in
+            "true"|"1"|"on"|"ON") MQTT_DISC_BOOL="true" ;;
+            *) MQTT_DISC_BOOL="false" ;;
+        esac
         ;;
-esac
-
-if [ -z "$MQTT_HOST" ]; then MQTT_HOST="$EXIST_M_HOST"; fi
-if [ -z "$MQTT_PORT" ]; then MQTT_PORT="${EXIST_M_PORT:-1883}"; fi
-if [ -z "$MQTT_USER" ]; then MQTT_USER="$EXIST_M_USER"; fi
-if [ -z "$MQTT_TOPIC" ]; then MQTT_TOPIC="${EXIST_M_TOPIC:-panel/tpp01}"; fi
-
-case "$MQTT_DISCOVERY" in
-    "true"|"1"|"on"|"ON") MQTT_DISC_BOOL="true" ;;
-    "false"|"0"|"off"|"OFF") MQTT_DISC_BOOL="false" ;;
     *)
-        if [ -n "$EXIST_M_DISC" ]; then MQTT_DISC_BOOL="$EXIST_M_DISC"; else MQTT_DISC_BOOL="true"; fi
+        case "$MQTT_ENABLED" in
+            "true"|"1"|"on"|"ON") MQTT_EN_BOOL="true" ;;
+            "false"|"0"|"off"|"OFF") MQTT_EN_BOOL="false" ;;
+            *)
+                if [ -n "$EXIST_M_EN" ]; then MQTT_EN_BOOL="$EXIST_M_EN"; else MQTT_EN_BOOL="false"; fi
+                ;;
+        esac
+
+        case "$MQTT_DISCOVERY" in
+            "true"|"1"|"on"|"ON") MQTT_DISC_BOOL="true" ;;
+            "false"|"0"|"off"|"OFF") MQTT_DISC_BOOL="false" ;;
+            *)
+                if [ -n "$EXIST_M_DISC" ]; then MQTT_DISC_BOOL="$EXIST_M_DISC"; else MQTT_DISC_BOOL="true"; fi
+                ;;
+        esac
         ;;
 esac
 
