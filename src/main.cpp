@@ -2072,6 +2072,12 @@ int main(void) {
     
     // Clean old backup binary on start if it exists to release disk space
     unlink("/tuya/data/ha_panel.old");
+
+    // Ensure DHCP daemon is active on wlan0
+    if (system("pidof udhcpc >/dev/null") != 0) {
+        system("udhcpc -i wlan0 -b -p /var/run/udhcpc.wlan0.pid >/dev/null 2>&1 &");
+        printf("[Network] Started background udhcpc DHCP client on wlan0.\n");
+    }
     
     // 1. Initialize LVGL engine
     lv_init();
