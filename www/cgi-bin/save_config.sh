@@ -106,7 +106,12 @@ if [ -f "/tuya/data/ha_config.json" ]; then
 fi
 
 if [ -z "$HA_URL" ]; then HA_URL="$EXIST_URL"; fi
-if [ -z "$HA_TOKEN" ]; then HA_TOKEN="$EXIST_TOKEN"; fi
+
+# If submitted token is empty or contains dots/masking, reuse existing token
+case "$HA_TOKEN" in
+    ""|*•*|*ZAMASKOWANY*) HA_TOKEN="$EXIST_TOKEN" ;;
+esac
+
 if [ -z "$ENTITY_1" ]; then ENTITY_1="${EXIST_E1:-light.living_room}"; fi
 if [ -z "$ENTITY_1_NAME" ]; then ENTITY_1_NAME="${EXIST_E1N:-ŚWIATŁO}"; fi
 if [ -z "$ENTITY_2" ]; then ENTITY_2="${EXIST_E2:-switch.fan}"; fi
@@ -225,6 +230,7 @@ cat <<EOF
         
         <div class="info-list">
             <div class="info-item"><span>Serwer HA:</span> <strong>$HA_URL</strong></div>
+            <div class="info-item"><span>Token:</span> <strong>•••••••••••••••• (Zapisano)</strong></div>
             <div class="info-item"><span>Przycisk 1:</span> <strong>$ENTITY_1_NAME ($ENTITY_1)</strong></div>
             <div class="info-item"><span>Przycisk 2:</span> <strong>$ENTITY_2_NAME ($ENTITY_2)</strong></div>
         </div>
@@ -233,7 +239,7 @@ cat <<EOF
             🔄 Restart aplikacji w toku. Ładowanie pulpitu za: <span id="cnt">3</span> s
         </div>
         
-        <a href="/" class="btn-home">⬅️ Powrót do Strony Główny</a>
+        <a href="/" class="btn-home">⬅️ Powrót do Strony Głównie</a>
     </div>
 
     <script>

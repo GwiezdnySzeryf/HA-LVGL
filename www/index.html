@@ -353,7 +353,10 @@
                     
                     <div class="form-group">
                         <label for="ha_token">Długowieczny Token Dostępu (Access Token)</label>
-                        <textarea id="ha_token" name="ha_token" placeholder="Wklej token z profilu Home Assistant..." required></textarea>
+                        <div style="position: relative; display: flex; align-items: center;">
+                            <input type="password" id="ha_token" name="ha_token" placeholder="Wklej token z profilu Home Assistant..." required style="padding-right: 44px;">
+                            <button type="button" onclick="toggleTokenVisibility()" style="position: absolute; right: 4px; width: auto; padding: 6px 10px; background: transparent; color: var(--text-sub); border: none; font-size: 16px; cursor: pointer;" title="Pokaż / Ukryj token">👁️</button>
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -453,6 +456,11 @@
             setTimeout(() => toast.classList.remove('show'), 3000);
         }
 
+        function toggleTokenVisibility() {
+            const input = document.getElementById('ha_token');
+            input.type = input.type === 'password' ? 'text' : 'password';
+        }
+
         function refreshScreenshot() {
             fetch('/cgi-bin/screenshot.sh')
                 .then(res => res.arrayBuffer())
@@ -520,6 +528,8 @@
                     document.getElementById('stat-ha').innerText = data.ha_configured ? 'Połączono' : 'Nie połączono';
                     document.getElementById('stat-uptime').innerText = data.uptime || '-';
                     
+                    const tokenInput = document.getElementById('ha_token');
+
                     if (data.ha_configured) {
                         document.getElementById('ha-connected-banner').style.display = 'flex';
                         document.getElementById('ha-connected-url').innerText = data.ha_url || 'Brak URL';
@@ -534,8 +544,16 @@
                         document.getElementById('save-btn').innerText = 'Zaktualizuj Konfigurację i Zrestartuj';
                     }
 
+                    if (data.ha_token_set) {
+                        tokenInput.removeAttribute('required');
+                        tokenInput.value = '';
+                        tokenInput.placeholder = '•••••••••••••••• (Token jest zapisany - wpisz nowy aby zmienić)';
+                    } else {
+                        tokenInput.setAttribute('required', 'required');
+                        tokenInput.placeholder = 'Wklej token z profilu Home Assistant...';
+                    }
+
                     if (data.ha_url) document.getElementById('ha_url').value = data.ha_url;
-                    if (data.ha_token) document.getElementById('ha_token').value = data.ha_token;
                     if (data.entity_1) document.getElementById('entity_1').value = data.entity_1;
                     if (data.entity_1_name) document.getElementById('entity_1_name').value = data.entity_1_name;
                     if (data.entity_2) document.getElementById('entity_2').value = data.entity_2;
