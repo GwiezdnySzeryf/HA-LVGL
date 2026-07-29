@@ -1,9 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -13,6 +17,14 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <thread>
+#include <chrono>
+#include <atomic>
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/error.h"
 #include "../lvgl/lvgl.h"
 #include "../lvgl/src/extra/libs/qrcode/lv_qrcode.h"
 
@@ -272,6 +284,277 @@ static void publish_panel_state_to_ha(void) {
                 << "\"screen_timeout_s\":" << (screen_timeout_ms / 1000) << "}}";
 
     ha_request("POST", "/api/states/sensor.moes_panel_status", status_body.str(), NULL);
+}
+
+struct ControlStateAsyncData {
+    HaControl *control;
+    bool is_on;
+};
+
+static void update_control_state_async(void * user_data) {
+    ControlStateAsyncData * data = (ControlStateAsyncData *)user_data;
+    if (data && data->control && data->control->button) {
+        if (data->is_on) {
+            lv_obj_add_state(data->control->button, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(data->control->button, LV_STATE_CHECKED);
+        }
+    }
+    delete data;
+}
+
+static std::atomic<bool> ws_connected{false};
+static std::thread * ws_thread_ptr = NULL;
+static std::atomic<bool> ws_thread_running{false};
+
+static std::string ws_encode_frame(const std::string &message) {
+    std::string frame;
+    frame.push_back((char)0x81); // FIN = 1, Opcode = 1 (text)
+    size_t len = message.size();
+    if (len <= 125) {
+        frame.push_back((char)(0x80 | len));
+    } else if (len <= 65535) {
+        frame.push_back((char)(0x80 | 126));
+        frame.push_back((char)((len >> 8) & 0xFF));
+        frame.push_back((char)(len & 0xFF));
+    } else {
+        frame.push_back((char)(0x80 | 127));
+        for (int i = 7; i >= 0; i--) {
+            frame.push_back((char)((len >> (i * 8)) & 0xFF));
+        }
+    }
+    char mask[4] = {0x12, 0x34, 0x56, 0x78};
+    frame.append(mask, 4);
+    for (size_t i = 0; i < len; i++) {
+        frame.push_back(message[i] ^ mask[i % 4]);
+    }
+    return frame;
+}
+
+static bool parse_ha_url_components(std::string *host, int *port, std::string *base_path) {
+    std::string url = ha_url;
+    while (!url.empty() && (url.back() == ' ' || url.back() == '\r' || url.back() == '\n' || url.back() == '\t')) url.pop_back();
+    while (!url.empty() && (url.front() == ' ' || url.front() == '\t')) url.erase(0, 1);
+
+    if (url.empty()) return false;
+
+    if (url.compare(0, 8, "https://") == 0) {
+        url = url.substr(8);
+    } else if (url.compare(0, 7, "http://") == 0) {
+        url = url.substr(7);
+    }
+
+    size_t slash = url.find('/');
+    std::string authority = slash == std::string::npos ? url : url.substr(0, slash);
+    *base_path = slash == std::string::npos ? "" : url.substr(slash);
+    while (!base_path->empty() && base_path->back() == '/') base_path->pop_back();
+
+    size_t colon = authority.rfind(':');
+    *host = colon == std::string::npos ? authority : authority.substr(0, colon);
+    *port = colon == std::string::npos ? 8123 : atoi(authority.substr(colon + 1).c_str());
+    return !host->empty() && *port > 0 && *port <= 65535;
+}
+
+static bool ws_read_bytes_mbed(mbedtls_ssl_context *ssl, char *dest, size_t len) {
+    size_t read_bytes = 0;
+    while (read_bytes < len) {
+        int r = mbedtls_ssl_read(ssl, (unsigned char*)dest + read_bytes, len - read_bytes);
+        if (r <= 0) return false;
+        read_bytes += r;
+    }
+    return true;
+}
+
+static bool ws_read_frame_mbed(mbedtls_ssl_context *ssl, std::string &out_payload) {
+    char hdr[2];
+    if (!ws_read_bytes_mbed(ssl, hdr, 2)) return false;
+
+    uint8_t mask_len = (uint8_t)hdr[1];
+    bool has_mask = (mask_len & 0x80) != 0;
+    size_t len = mask_len & 0x7F;
+
+    if (len == 126) {
+        char len_bytes[2];
+        if (!ws_read_bytes_mbed(ssl, len_bytes, 2)) return false;
+        len = ((uint8_t)len_bytes[0] << 8) | (uint8_t)len_bytes[1];
+    } else if (len == 127) {
+        char len_bytes[8];
+        if (!ws_read_bytes_mbed(ssl, len_bytes, 8)) return false;
+        len = 0;
+        for (int i = 0; i < 8; i++) {
+            len = (len << 8) | (uint8_t)len_bytes[i];
+        }
+    }
+
+    char mask_key[4] = {0};
+    if (has_mask) {
+        if (!ws_read_bytes_mbed(ssl, mask_key, 4)) return false;
+    }
+
+    out_payload.resize(len);
+    if (len > 0) {
+        if (!ws_read_bytes_mbed(ssl, &out_payload[0], len)) return false;
+    }
+
+    if (has_mask) {
+        for (size_t i = 0; i < len; i++) {
+            out_payload[i] ^= mask_key[i % 4];
+        }
+    }
+    return true;
+}
+
+static void ws_send_frame_mbed(mbedtls_ssl_context *ssl, const std::string &message) {
+    std::string frame = ws_encode_frame(message);
+    mbedtls_ssl_write(ssl, (const unsigned char *)frame.data(), frame.size());
+}
+
+static void ws_thread_loop() {
+    printf("[WebSocket ⚡] Native MbedTLS thread starting for URL: %s...\n", ha_url.c_str());
+    while (ws_thread_running) {
+        if (ha_url.empty() || ha_token.empty()) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
+
+        std::string host;
+        int port = 8123;
+        std::string base_path;
+        if (!parse_ha_url_components(&host, &port, &base_path)) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            continue;
+        }
+
+        mbedtls_net_context server_fd;
+        mbedtls_entropy_context entropy;
+        mbedtls_ctr_drbg_context ctr_drbg;
+        mbedtls_ssl_context ssl;
+        mbedtls_ssl_config conf;
+
+        mbedtls_net_init(&server_fd);
+        mbedtls_ssl_init(&ssl);
+        mbedtls_ssl_config_init(&conf);
+        mbedtls_ctr_drbg_init(&ctr_drbg);
+        mbedtls_entropy_init(&entropy);
+
+        mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, (const unsigned char *)"ha_panel", 8);
+
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+
+        if (mbedtls_net_connect(&server_fd, host.c_str(), port_str, MBEDTLS_NET_PROTO_TCP) != 0) {
+            printf("[WebSocket ❌] TCP Connection to %s:%d failed. Retrying in 3s...\n", host.c_str(), port);
+            mbedtls_net_free(&server_fd);
+            mbedtls_ssl_free(&ssl);
+            mbedtls_ssl_config_free(&conf);
+            mbedtls_ctr_drbg_free(&ctr_drbg);
+            mbedtls_entropy_free(&entropy);
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            continue;
+        }
+
+        mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+        mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+        mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+        mbedtls_ssl_setup(&ssl, &conf);
+        mbedtls_ssl_set_hostname(&ssl, host.c_str());
+        mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+        int ret = 0;
+        while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                printf("[WebSocket ❌] TLS Handshake failed: -0x%x\n", -ret);
+                break;
+            }
+        }
+
+        if (ret == 0) {
+            printf("[WebSocket 🟢] MbedTLS Handshake OK! Sending HTTP WebSocket Upgrade...\n");
+            std::string req = 
+                "GET " + base_path + "/api/websocket HTTP/1.1\r\n"
+                "Host: " + host + ":" + port_str + "\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n";
+
+            mbedtls_ssl_write(&ssl, (const unsigned char *)req.data(), req.size());
+
+            std::string header_buf;
+            char c;
+            bool header_ok = false;
+            while (ws_read_bytes_mbed(&ssl, &c, 1)) {
+                header_buf.push_back(c);
+                if (header_buf.size() >= 4 && header_buf.substr(header_buf.size() - 4) == "\r\n\r\n") {
+                    header_ok = true;
+                    break;
+                }
+                if (header_buf.size() > 4096) break;
+            }
+
+            if (header_ok && header_buf.find("101") != std::string::npos) {
+                printf("[WebSocket 🟢] HTTP 101 Upgrade Successful!\n");
+                std::string msg;
+                while (ws_thread_running && ws_read_frame_mbed(&ssl, msg)) {
+                    if (msg.find("auth_required") != std::string::npos) {
+                        printf("[WebSocket 🔑] Received auth_required. Authenticating...\n");
+                        std::string auth = "{\"type\":\"auth\",\"access_token\":\"" + ha_token + "\"}";
+                        ws_send_frame_mbed(&ssl, auth);
+                    } else if (msg.find("auth_ok") != std::string::npos) {
+                        printf("[WebSocket 🟢🟢] AUTH OK! Subscribing to real-time events...\n");
+                        ws_connected = true;
+
+                        std::string sub = "{\"id\":1,\"type\":\"subscribe_events\",\"event_type\":\"state_changed\"}";
+                        ws_send_frame_mbed(&ssl, sub);
+
+                        std::string get_st = "{\"id\":2,\"type\":\"get_states\"}";
+                        ws_send_frame_mbed(&ssl, get_st);
+                    } else if (msg.find("state_changed") != std::string::npos || msg.find("entity_id") != std::string::npos) {
+                        for (int i = 0; i < 2; i++) {
+                            if (ha_controls[i].entity_id.empty()) continue;
+                            size_t pos = msg.find(ha_controls[i].entity_id);
+                            if (pos != std::string::npos) {
+                                size_t st_pos = msg.find("\"state\":", pos);
+                                if (st_pos == std::string::npos) st_pos = msg.find("\"state\":");
+                                if (st_pos != std::string::npos) {
+                                    size_t q1 = msg.find("\"", st_pos + 8);
+                                    if (q1 != std::string::npos) {
+                                        size_t q2 = msg.find("\"", q1 + 1);
+                                        if (q2 != std::string::npos) {
+                                            std::string st = msg.substr(q1 + 1, q2 - q1 - 1);
+                                            bool is_on = (st == "on");
+                                            printf("[WebSocket Live Event ⚡] %s -> %s\n", ha_controls[i].entity_id.c_str(), st.c_str());
+                                            lv_async_call(update_control_state_async, new ControlStateAsyncData{&ha_controls[i], is_on});
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                printf("[WebSocket ❌] HTTP Upgrade failed or rejected by HA.\n");
+            }
+        }
+
+        ws_connected = false;
+        mbedtls_net_free(&server_fd);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
+
+        printf("[WebSocket] Connection closed. Reconnecting in 3s...\n");
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
+}
+
+static void start_websocket_thread() {
+    if (ws_thread_running) return;
+    printf("[WebSocket] Spawning background thread...\n");
+    ws_thread_running = true;
+    ws_thread_ptr = new std::thread(ws_thread_loop);
 }
 
 static void update_control_state(HaControl *control) {
@@ -1245,6 +1528,8 @@ void create_home_assistant_ui(void) {
     update_control_state(&ha_controls[0]);
     update_control_state(&ha_controls[1]);
     lv_timer_create(state_poll_timer_cb, 5000, NULL);
+
+    start_websocket_thread();
 
     create_control_center(scr);
 }

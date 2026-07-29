@@ -7,9 +7,10 @@ CC = $(TOOLCHAIN_DIR)/bin/aarch64-none-linux-gnu-gcc
 CXX = $(TOOLCHAIN_DIR)/bin/aarch64-none-linux-gnu-g++
 
 # Static linking to prevent runtime dynamic library conflicts on the panel
-CFLAGS = -O3 -Wall -Wshadow -static -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl
+CFLAGS = -O3 -Wall -Wshadow -static -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -Imbedtls/include
 CXXFLAGS = $(CFLAGS) -std=c++11
 LDFLAGS = -static -s
+MBEDTLS_LIBS = mbedtls/library/libmbedtls.a mbedtls/library/libmbedx509.a mbedtls/library/libmbedcrypto.a
 
 # Output binary name
 BIN = ha_panel
@@ -37,20 +38,20 @@ pc:
 	@echo "[COMPILE FOR PC SIMULATOR]"
 	@for f in $(CSRCS); do \
 		echo "[CC_PC] $$f"; \
-		gcc -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -c $$f -o $${f%.c}.o || exit 1; \
+		gcc -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -Imbedtls/include -c $$f -o $${f%.c}.o || exit 1; \
 	done
 	@echo "[CXX_PC] src/hal.cpp"
-	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/hal.cpp -o src/hal.o
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -Imbedtls/include -std=c++11 -c src/hal.cpp -o src/hal.o
 	@echo "[CXX_PC] src/ha_logo.cpp"
-	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/ha_logo.cpp -o src/ha_logo.o
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -Imbedtls/include -std=c++11 -c src/ha_logo.cpp -o src/ha_logo.o
 	@echo "[CXX_PC] src/main.cpp"
-	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c src/main.cpp -o src/main.o
+	g++ -O3 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -Imbedtls/include -std=c++11 -c src/main.cpp -o src/main.o
 	@echo "[LINK_PC] ha_panel_pc"
-	g++ src/hal.o src/ha_logo.o src/main.o $(COBJS) -lSDL2 -o ha_panel_pc
+	g++ src/hal.o src/ha_logo.o src/main.o $(COBJS) $(MBEDTLS_LIBS) -lSDL2 -lpthread -o ha_panel_pc
 
 $(BIN): $(OBJS) Makefile
 	@echo "[LINK] $@"
-	$(CXX) $(LDFLAGS) $(OBJS) -o $(BIN)
+	$(CXX) $(LDFLAGS) $(OBJS) $(MBEDTLS_LIBS) -lpthread -o $(BIN)
 
 %.o: %.c
 	@echo "[CC] $<"
