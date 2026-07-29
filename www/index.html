@@ -415,8 +415,12 @@
                         <span id="stat-ha">Sprawdzanie...</span>
                     </div>
                     <div class="status-item">
+                        <span>Połączenie MQTT</span>
+                        <span id="stat-mqtt">Wyłączony</span>
+                    </div>
+                    <div class="status-item">
                         <span>Wersja Oprogramowania</span>
-                        <span>v1.7.0</span>
+                        <span>v1.8.0</span>
                     </div>
                     <div class="status-item">
                         <span>Czas Pracy (Uptime)</span>
@@ -435,6 +439,52 @@
                 <div class="btn-group" style="margin-top: 15px;">
                     <button type="button" class="secondary" onclick="triggerAction('restart_app')">Zrestartuj Aplikację</button>
                     <button type="button" class="secondary" style="background: var(--danger);" onclick="triggerAction('reboot')">Restart Panelu</button>
+                </div>
+            </div>
+
+            <!-- MQTT Broker Configuration -->
+            <div class="card">
+                <h2>📡 Integracja z MQTT Broker</h2>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; text-transform: none; font-size: 13px; color: var(--text-main);">
+                        <input type="checkbox" id="mqtt_enabled" name="mqtt_enabled" form="configForm" style="width: 18px; height: 18px; accent-color: var(--accent);">
+                        <strong>Włącz klienta MQTT</strong>
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label for="mqtt_host">Adres Brokera MQTT (Host / IP)</label>
+                    <input type="text" id="mqtt_host" name="mqtt_host" form="configForm" placeholder="np. 192.168.1.73">
+                </div>
+
+                <div class="form-group">
+                    <label for="mqtt_port">Port Brokera</label>
+                    <input type="text" id="mqtt_port" name="mqtt_port" form="configForm" value="1883" placeholder="1883">
+                </div>
+
+                <div class="form-group">
+                    <label for="mqtt_user">Użytkownik MQTT (opcjonalnie)</label>
+                    <input type="text" id="mqtt_user" name="mqtt_user" form="configForm" placeholder="homeassistant">
+                </div>
+
+                <div class="form-group">
+                    <label for="mqtt_pass">Hasło MQTT (opcjonalnie)</label>
+                    <div style="position: relative; display: flex; align-items: center;">
+                        <input type="password" id="mqtt_pass" name="mqtt_pass" form="configForm" placeholder="Hasło brokera MQTT..." style="padding-right: 44px;">
+                        <button type="button" onclick="toggleMqttPassVisibility()" style="position: absolute; right: 4px; width: auto; padding: 6px 10px; background: transparent; color: var(--text-sub); border: none; font-size: 16px; cursor: pointer;" title="Pokaż / Ukryj hasło">👁️</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="mqtt_topic">Główny Temat (Base Topic)</label>
+                    <input type="text" id="mqtt_topic" name="mqtt_topic" form="configForm" value="panel/tpp01" placeholder="panel/tpp01">
+                </div>
+
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; text-transform: none; font-size: 13px; color: var(--text-main);">
+                        <input type="checkbox" id="mqtt_discovery" name="mqtt_discovery" form="configForm" checked style="width: 18px; height: 18px; accent-color: var(--accent);">
+                        Włącz Home Assistant MQTT Auto-Discovery
+                    </label>
                 </div>
             </div>
         </div>
@@ -458,6 +508,11 @@
 
         function toggleTokenVisibility() {
             const input = document.getElementById('ha_token');
+            input.type = input.type === 'password' ? 'text' : 'password';
+        }
+
+        function toggleMqttPassVisibility() {
+            const input = document.getElementById('mqtt_pass');
             input.type = input.type === 'password' ? 'text' : 'password';
         }
 
@@ -558,6 +613,33 @@
                     if (data.entity_1_name) document.getElementById('entity_1_name').value = data.entity_1_name;
                     if (data.entity_2) document.getElementById('entity_2').value = data.entity_2;
                     if (data.entity_2_name) document.getElementById('entity_2_name').value = data.entity_2_name;
+
+                    // Populate MQTT status & inputs
+                    if (data.mqtt_enabled) {
+                        document.getElementById('mqtt_enabled').checked = true;
+                        document.getElementById('stat-mqtt').innerText = data.mqtt_host ? ('Włączony (' + data.mqtt_host + ')') : 'Włączony';
+                        document.getElementById('stat-mqtt').style.color = '#81c784';
+                    } else {
+                        document.getElementById('mqtt_enabled').checked = false;
+                        document.getElementById('stat-mqtt').innerText = 'Wyłączony';
+                        document.getElementById('stat-mqtt').style.color = 'var(--text-sub)';
+                    }
+
+                    if (data.mqtt_host) document.getElementById('mqtt_host').value = data.mqtt_host;
+                    if (data.mqtt_port) document.getElementById('mqtt_port').value = data.mqtt_port;
+                    if (data.mqtt_user) document.getElementById('mqtt_user').value = data.mqtt_user;
+                    
+                    const mqttPassInput = document.getElementById('mqtt_pass');
+                    if (data.mqtt_pass_set) {
+                        mqttPassInput.placeholder = '•••••••••••••••• (Hasło jest zapisane - wpisz nowe aby zmienić)';
+                    } else {
+                        mqttPassInput.placeholder = 'Hasło brokera MQTT...';
+                    }
+
+                    if (data.mqtt_topic) document.getElementById('mqtt_topic').value = data.mqtt_topic;
+                    if (data.mqtt_discovery !== undefined) {
+                        document.getElementById('mqtt_discovery').checked = data.mqtt_discovery;
+                    }
                 })
                 .catch(err => console.error('Status fetch error:', err));
         }

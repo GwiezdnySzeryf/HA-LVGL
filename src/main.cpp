@@ -27,6 +27,7 @@
 #include "mbedtls/error.h"
 #include "../lvgl/lvgl.h"
 #include "../lvgl/src/extra/libs/qrcode/lv_qrcode.h"
+#include "mqtt_client.h"
 
 // HAL declarations
 bool hal_display_init(void);
@@ -40,6 +41,9 @@ extern void hal_set_backlight(int raw_val);
 extern void hal_wake_screen(void);
 extern void hal_blank_screen(void);
 extern "C" uint32_t custom_tick_get(void);
+
+MqttClient g_mqtt_client;
+MqttConfig g_mqtt_config;
 
 static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
 
@@ -184,6 +188,25 @@ size_t parse_json_int_value(const std::string &json, const std::string &key) {
     return (size_t)atoll(json.c_str() + val_start);
 }
 
+bool parse_json_bool_value(const std::string &json, const std::string &key, bool fallback = false) {
+    size_t key_pos = json.find("\"" + key + "\"");
+    if (key_pos == std::string::npos) return fallback;
+    size_t colon_pos = json.find(":", key_pos);
+    if (colon_pos == std::string::npos) return fallback;
+    
+    size_t true_pos = json.find("true", colon_pos);
+    size_t false_pos = json.find("false", colon_pos);
+    size_t comma_pos = json.find_first_of(",}\n\r", colon_pos);
+
+    if (true_pos != std::string::npos && (comma_pos == std::string::npos || true_pos < comma_pos)) {
+        return true;
+    }
+    if (false_pos != std::string::npos && (comma_pos == std::string::npos || false_pos < comma_pos)) {
+        return false;
+    }
+    return fallback;
+}
+
 // Load config file values
 bool load_configuration() {
     std::ifstream f("/tuya/data/ha_config.json");
@@ -208,8 +231,48 @@ bool load_configuration() {
 
     if (!configured_name_1.empty()) ha_entity_1_name = configured_name_1;
     if (!configured_name_2.empty()) ha_entity_2_name = configured_name_2;
-    
+
+    // Load MQTT parameters
+    g_mqtt_config.enabled = parse_json_bool_value(json, "mqtt_enabled", false);
+    g_mqtt_config.host = parse_json_value(json, "mqtt_host");
+    int port_val = (int)parse_json_int_value(json, "mqtt_port");
+    g_mqtt_config.port = (port_val > 0) ? port_val : 1883;
+
+    g_mqtt_config.username = parse_json_value(json, "mqtt_user");
+    g_mqtt_config.password = parse_json_value(json, "mqtt_pass");
+
+    std::string topic = parse_json_value(json, "mqtt_topic");
+    g_mqtt_config.base_topic = !topic.empty() ? topic : "panel/tpp01";
+
+    g_mqtt_config.discovery = parse_json_bool_value(json, "mqtt_discovery", true);
+
+    printf("[Config] MQTT enabled=%d, host='%s', port=%d, topic='%s'\n",
+           g_mqtt_config.enabled, g_mqtt_config.host.c_str(), g_mqtt_config.port, g_mqtt_config.base_topic.c_str());
+
     return !ha_url.empty() && !ha_token.empty();
+}
+
+void save_configuration() {
+    std::ofstream f("/tuya/data/ha_config.json");
+    if (!f.is_open()) return;
+
+    f << "{\n"
+      << "  \"ha_url\": \"" << ha_url << "\",\n"
+      << "  \"ha_token\": \"" << ha_token << "\",\n"
+      << "  \"entity_1\": \"" << ha_entity_1 << "\",\n"
+      << "  \"entity_1_name\": \"" << ha_entity_1_name << "\",\n"
+      << "  \"entity_2\": \"" << ha_entity_2 << "\",\n"
+      << "  \"entity_2_name\": \"" << ha_entity_2_name << "\",\n"
+      << "  \"mqtt_enabled\": " << (g_mqtt_config.enabled ? "true" : "false") << ",\n"
+      << "  \"mqtt_host\": \"" << g_mqtt_config.host << "\",\n"
+      << "  \"mqtt_port\": " << g_mqtt_config.port << ",\n"
+      << "  \"mqtt_user\": \"" << g_mqtt_config.username << "\",\n"
+      << "  \"mqtt_pass\": \"" << g_mqtt_config.password << "\",\n"
+      << "  \"mqtt_topic\": \"" << g_mqtt_config.base_topic << "\",\n"
+      << "  \"mqtt_discovery\": " << (g_mqtt_config.discovery ? "true" : "false") << "\n"
+      << "}\n";
+    f.close();
+    chmod("/tuya/data/ha_config.json", 0600);
 }
 
 struct HaControl {
@@ -793,12 +856,83 @@ enum settings_action_t {
     SETTINGS_ACTION_CONTROLS,
     SETTINGS_ACTION_DIAGNOSTICS,
     SETTINGS_ACTION_INFO,
-    SETTINGS_ACTION_UPDATES
+    SETTINGS_ACTION_UPDATES,
+    SETTINGS_ACTION_MQTT
 };
 
 static void create_updates_screen(void);
 static void create_diagnostics_screen(void);
 static void create_info_screen(void);
+static void create_mqtt_screen(void);
+
+static lv_obj_t * mqtt_screen = NULL;
+static lv_obj_t * mqtt_kb = NULL;
+static lv_obj_t * mqtt_sw_en = NULL;
+static lv_obj_t * mqtt_ta_host = NULL;
+static lv_obj_t * mqtt_ta_port = NULL;
+static lv_obj_t * mqtt_ta_user = NULL;
+static lv_obj_t * mqtt_ta_pass = NULL;
+static lv_obj_t * mqtt_ta_topic = NULL;
+static lv_obj_t * mqtt_sw_disc = NULL;
+
+static void close_mqtt_screen(void) {
+    if (mqtt_kb) {
+        lv_obj_del(mqtt_kb);
+        mqtt_kb = NULL;
+    }
+    if (mqtt_screen) {
+        lv_obj_del_async(mqtt_screen);
+        mqtt_screen = NULL;
+    }
+}
+
+static void mqtt_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_mqtt_screen();
+}
+
+static void mqtt_ta_event_cb(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t * ta = lv_event_get_target(e);
+
+    if (code == LV_EVENT_FOCUSED) {
+        if (!mqtt_kb) {
+            mqtt_kb = lv_keyboard_create(lv_layer_top());
+            lv_obj_set_size(mqtt_kb, 480, 220);
+            lv_obj_align(mqtt_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+        }
+        lv_keyboard_set_textarea(mqtt_kb, ta);
+        lv_obj_clear_flag(mqtt_kb, LV_OBJ_FLAG_HIDDEN);
+    } else if (code == LV_EVENT_DEFOCUSED || code == LV_EVENT_READY) {
+        if (mqtt_kb) {
+            lv_obj_add_flag(mqtt_kb, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void save_mqtt_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    g_mqtt_config.enabled = lv_obj_has_state(mqtt_sw_en, LV_STATE_CHECKED);
+    g_mqtt_config.host = lv_textarea_get_text(mqtt_ta_host);
+    
+    int port_val = atoi(lv_textarea_get_text(mqtt_ta_port));
+    g_mqtt_config.port = port_val > 0 ? port_val : 1883;
+
+    g_mqtt_config.username = lv_textarea_get_text(mqtt_ta_user);
+    g_mqtt_config.password = lv_textarea_get_text(mqtt_ta_pass);
+    g_mqtt_config.base_topic = lv_textarea_get_text(mqtt_ta_topic);
+    g_mqtt_config.discovery = lv_obj_has_state(mqtt_sw_disc, LV_STATE_CHECKED);
+
+    save_configuration();
+
+    g_mqtt_client.stop();
+    g_mqtt_client.configure(g_mqtt_config);
+    if (g_mqtt_config.enabled) {
+        g_mqtt_client.start();
+    }
+
+    close_mqtt_screen();
+}
 
 static void close_updates_screen(void) {
     if (updates_screen) {
@@ -825,6 +959,7 @@ static void close_settings(void) {
     close_updates_screen();
     close_diagnostics_screen();
     close_info_screen();
+    close_mqtt_screen();
     if (!settings_screen) return;
     lv_obj_del_async(settings_screen);
     settings_screen = NULL;
@@ -852,6 +987,8 @@ static void settings_card_event_cb(lv_event_t * e) {
         create_info_screen();
     } else if (action == SETTINGS_ACTION_UPDATES) {
         create_updates_screen();
+    } else if (action == SETTINGS_ACTION_MQTT) {
+        create_mqtt_screen();
     }
 }
 
@@ -1118,6 +1255,156 @@ static void create_info_screen(void) {
     lv_obj_set_pos(spacer, 0, y);
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
+
+static void create_mqtt_screen(void) {
+    if (mqtt_screen) return;
+
+    lv_obj_t * list = NULL;
+    mqtt_screen = create_subscreen_base("Konfiguracja MQTT", mqtt_back_event_cb, &list);
+
+    int y = 10;
+
+    // Switch: Enable MQTT
+    lv_obj_t * card_en = lv_obj_create(list);
+    lv_obj_set_size(card_en, 424, 60);
+    lv_obj_set_pos(card_en, 28, y);
+    lv_obj_set_style_bg_color(card_en, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card_en, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card_en, 14, LV_PART_MAIN);
+
+    lv_obj_t * lbl_en = lv_label_create(card_en);
+    lv_label_set_text(lbl_en, "Włącz klienta MQTT");
+    lv_obj_set_pos(lbl_en, 16, 18);
+    lv_obj_set_style_text_color(lbl_en, lv_color_white(), LV_PART_MAIN);
+
+    mqtt_sw_en = lv_switch_create(card_en);
+    lv_obj_align(mqtt_sw_en, LV_ALIGN_RIGHT_MID, -16, 0);
+    if (g_mqtt_config.enabled) lv_obj_add_state(mqtt_sw_en, LV_STATE_CHECKED);
+    else lv_obj_clear_state(mqtt_sw_en, LV_STATE_CHECKED);
+
+    y += 70;
+
+    // Host Textarea
+    lv_obj_t * lbl_host = lv_label_create(list);
+    lv_label_set_text(lbl_host, "Adres Brokera (IP / Host):");
+    lv_obj_set_pos(lbl_host, 32, y);
+    lv_obj_set_style_text_color(lbl_host, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 24;
+
+    mqtt_ta_host = lv_textarea_create(list);
+    lv_obj_set_size(mqtt_ta_host, 416, 40);
+    lv_obj_set_pos(mqtt_ta_host, 32, y);
+    lv_textarea_set_one_line(mqtt_ta_host, true);
+    lv_textarea_set_placeholder_text(mqtt_ta_host, "192.168.1.73");
+    lv_textarea_set_text(mqtt_ta_host, g_mqtt_config.host.c_str());
+    lv_obj_add_event_cb(mqtt_ta_host, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    y += 50;
+
+    // Port Textarea
+    lv_obj_t * lbl_port = lv_label_create(list);
+    lv_label_set_text(lbl_port, "Port Brokera:");
+    lv_obj_set_pos(lbl_port, 32, y);
+    lv_obj_set_style_text_color(lbl_port, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 24;
+
+    mqtt_ta_port = lv_textarea_create(list);
+    lv_obj_set_size(mqtt_ta_port, 416, 40);
+    lv_obj_set_pos(mqtt_ta_port, 32, y);
+    lv_textarea_set_one_line(mqtt_ta_port, true);
+    lv_textarea_set_placeholder_text(mqtt_ta_port, "1883");
+    lv_textarea_set_text(mqtt_ta_port, std::to_string(g_mqtt_config.port).c_str());
+    lv_obj_add_event_cb(mqtt_ta_port, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    y += 50;
+
+    // Username Textarea
+    lv_obj_t * lbl_user = lv_label_create(list);
+    lv_label_set_text(lbl_user, "Użytkownik MQTT:");
+    lv_obj_set_pos(lbl_user, 32, y);
+    lv_obj_set_style_text_color(lbl_user, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 24;
+
+    mqtt_ta_user = lv_textarea_create(list);
+    lv_obj_set_size(mqtt_ta_user, 416, 40);
+    lv_obj_set_pos(mqtt_ta_user, 32, y);
+    lv_textarea_set_one_line(mqtt_ta_user, true);
+    lv_textarea_set_placeholder_text(mqtt_ta_user, "opcjonalnie");
+    lv_textarea_set_text(mqtt_ta_user, g_mqtt_config.username.c_str());
+    lv_obj_add_event_cb(mqtt_ta_user, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    y += 50;
+
+    // Password Textarea
+    lv_obj_t * lbl_pass = lv_label_create(list);
+    lv_label_set_text(lbl_pass, "Hasło MQTT:");
+    lv_obj_set_pos(lbl_pass, 32, y);
+    lv_obj_set_style_text_color(lbl_pass, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 24;
+
+    mqtt_ta_pass = lv_textarea_create(list);
+    lv_obj_set_size(mqtt_ta_pass, 416, 40);
+    lv_obj_set_pos(mqtt_ta_pass, 32, y);
+    lv_textarea_set_one_line(mqtt_ta_pass, true);
+    lv_textarea_set_password_mode(mqtt_ta_pass, true);
+    lv_textarea_set_placeholder_text(mqtt_ta_pass, "opcjonalnie");
+    lv_textarea_set_text(mqtt_ta_pass, g_mqtt_config.password.c_str());
+    lv_obj_add_event_cb(mqtt_ta_pass, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    y += 50;
+
+    // Base Topic Textarea
+    lv_obj_t * lbl_topic = lv_label_create(list);
+    lv_label_set_text(lbl_topic, "Główny Temat (Base Topic):");
+    lv_obj_set_pos(lbl_topic, 32, y);
+    lv_obj_set_style_text_color(lbl_topic, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    y += 24;
+
+    mqtt_ta_topic = lv_textarea_create(list);
+    lv_obj_set_size(mqtt_ta_topic, 416, 40);
+    lv_obj_set_pos(mqtt_ta_topic, 32, y);
+    lv_textarea_set_one_line(mqtt_ta_topic, true);
+    lv_textarea_set_placeholder_text(mqtt_ta_topic, "panel/tpp01");
+    lv_textarea_set_text(mqtt_ta_topic, g_mqtt_config.base_topic.c_str());
+    lv_obj_add_event_cb(mqtt_ta_topic, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    y += 50;
+
+    // Switch: HA Discovery
+    lv_obj_t * card_disc = lv_obj_create(list);
+    lv_obj_set_size(card_disc, 424, 60);
+    lv_obj_set_pos(card_disc, 28, y);
+    lv_obj_set_style_bg_color(card_disc, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card_disc, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(card_disc, 14, LV_PART_MAIN);
+
+    lv_obj_t * lbl_disc = lv_label_create(card_disc);
+    lv_label_set_text(lbl_disc, "HA Auto-Discovery");
+    lv_obj_set_pos(lbl_disc, 16, 18);
+    lv_obj_set_style_text_color(lbl_disc, lv_color_white(), LV_PART_MAIN);
+
+    mqtt_sw_disc = lv_switch_create(card_disc);
+    lv_obj_align(mqtt_sw_disc, LV_ALIGN_RIGHT_MID, -16, 0);
+    if (g_mqtt_config.discovery) lv_obj_add_state(mqtt_sw_disc, LV_STATE_CHECKED);
+    else lv_obj_clear_state(mqtt_sw_disc, LV_STATE_CHECKED);
+
+    y += 75;
+
+    // Save Button
+    lv_obj_t * save_btn = lv_btn_create(list);
+    lv_obj_set_size(save_btn, 416, 48);
+    lv_obj_set_pos(save_btn, 32, y);
+    lv_obj_set_style_bg_color(save_btn, lv_color_make(0x00, 0x89, 0x7B), LV_PART_MAIN);
+    lv_obj_set_style_radius(save_btn, 12, LV_PART_MAIN);
+    lv_obj_add_event_cb(save_btn, save_mqtt_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * save_lbl = lv_label_create(save_btn);
+    lv_label_set_text(save_lbl, "ZAPISZ I POŁĄCZ");
+    lv_obj_set_style_text_font(save_lbl, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(save_lbl, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(save_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    y += 70;
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 30);
+    lv_obj_set_pos(spacer, 0, y);
 }
 
 static void web_portal_switch_event_cb(lv_event_t * e) {
@@ -1650,6 +1937,16 @@ static void config_poll_timer(lv_timer_t * timer) {
     }
 }
 
+static void mqtt_telemetry_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (g_mqtt_client.is_connected()) {
+        g_mqtt_client.publish_state("screen", g_screen_blanked ? "OFF" : "ON");
+        g_mqtt_client.publish_state("brightness", std::to_string(g_active_backlight_raw));
+        g_mqtt_client.publish_state("ip", get_wlan0_ip());
+        g_mqtt_client.publish_state("ha_connected", ws_connected ? "true" : "false");
+    }
+}
+
 int main(void) {
     setbuf(stdout, NULL);
     printf("[HA Panel] Initializing Native LVGL Application...\n");
@@ -1705,6 +2002,44 @@ int main(void) {
     screen_timeout_ms = saved_timeout * 1000;
     lv_timer_create(screensaver_timer_cb, 500, NULL);
     printf("[ScreenSaver] Screen blanker initialized. Timeout: %u seconds.\n", saved_timeout);
+
+    // Initialize MQTT Client if configured
+    g_mqtt_client.configure(g_mqtt_config);
+    g_mqtt_client.set_command_callback([](const std::string& cmd, const std::string& payload) {
+        printf("[MQTT Command] Received cmd='%s', payload='%s'\n", cmd.c_str(), payload.c_str());
+        if (cmd == "screen") {
+            if (payload == "ON") {
+                hal_wake_screen();
+            } else if (payload == "OFF") {
+                hal_blank_screen();
+            } else if (payload == "TOGGLE") {
+                if (g_screen_blanked) hal_wake_screen();
+                else hal_blank_screen();
+            }
+        } else if (cmd == "brightness") {
+            int percent = atoi(payload.c_str());
+            if (percent >= 0 && percent <= 100) {
+                int raw_val = percent * backlight_max / 100;
+                hal_set_backlight(raw_val);
+            } else {
+                int raw_val = atoi(payload.c_str());
+                if (raw_val >= 0 && raw_val <= 255) hal_set_backlight(raw_val);
+            }
+        } else if (cmd == "reboot") {
+            if (payload == "PRESS" || payload == "reboot") {
+                printf("[MQTT Command] Reboot requested via MQTT!\n");
+                system("reboot &");
+            }
+        } else if (cmd == "buzzer") {
+            system("echo 1 > /sys/class/pwm/pwmchip0/pwm0/enable 2>/dev/null; usleep 50000; echo 0 > /sys/class/pwm/pwmchip0/pwm0/enable 2>/dev/null &");
+        }
+    });
+
+    if (g_mqtt_config.enabled) {
+        g_mqtt_client.start();
+    }
+
+    lv_timer_create(mqtt_telemetry_timer_cb, 5000, NULL);
 
     printf("[HA Panel] Main loop running. Rendering UI...\n");
 

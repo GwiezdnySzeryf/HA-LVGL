@@ -88,12 +88,28 @@ ENTITY_1_NAME_RAW=$(get_param "entity_1_name")
 ENTITY_2_RAW=$(get_param "entity_2")
 ENTITY_2_NAME_RAW=$(get_param "entity_2_name")
 
+MQTT_ENABLED_RAW=$(get_param "mqtt_enabled")
+MQTT_HOST_RAW=$(get_param "mqtt_host")
+MQTT_PORT_RAW=$(get_param "mqtt_port")
+MQTT_USER_RAW=$(get_param "mqtt_user")
+MQTT_PASS_RAW=$(get_param "mqtt_pass")
+MQTT_TOPIC_RAW=$(get_param "mqtt_topic")
+MQTT_DISCOVERY_RAW=$(get_param "mqtt_discovery")
+
 HA_URL=$(urldecode "$HA_URL_RAW")
 HA_TOKEN=$(urldecode "$HA_TOKEN_RAW")
 ENTITY_1=$(urldecode "$ENTITY_1_RAW")
 ENTITY_1_NAME=$(urldecode "$ENTITY_1_NAME_RAW")
 ENTITY_2=$(urldecode "$ENTITY_2_RAW")
 ENTITY_2_NAME=$(urldecode "$ENTITY_2_NAME_RAW")
+
+MQTT_ENABLED=$(urldecode "$MQTT_ENABLED_RAW")
+MQTT_HOST=$(urldecode "$MQTT_HOST_RAW")
+MQTT_PORT=$(urldecode "$MQTT_PORT_RAW")
+MQTT_USER=$(urldecode "$MQTT_USER_RAW")
+MQTT_PASS=$(urldecode "$MQTT_PASS_RAW")
+MQTT_TOPIC=$(urldecode "$MQTT_TOPIC_RAW")
+MQTT_DISCOVERY=$(urldecode "$MQTT_DISCOVERY_RAW")
 
 # Read existing config values as defaults if not provided in POST
 if [ -f "/tuya/data/ha_config.json" ]; then
@@ -103,6 +119,14 @@ if [ -f "/tuya/data/ha_config.json" ]; then
     EXIST_E1N=$(grep -o '"entity_1_name": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
     EXIST_E2=$(grep -o '"entity_2": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
     EXIST_E2N=$(grep -o '"entity_2_name": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+
+    EXIST_M_EN=$(grep -o '"mqtt_enabled": *[a-z0-9]*' /tuya/data/ha_config.json | head -n1 | awk '{print $2}')
+    EXIST_M_HOST=$(grep -o '"mqtt_host": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_M_PORT=$(grep -o '"mqtt_port": *[0-9]*' /tuya/data/ha_config.json | head -n1 | awk '{print $2}')
+    EXIST_M_USER=$(grep -o '"mqtt_user": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_M_PASS=$(grep -o '"mqtt_pass": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_M_TOPIC=$(grep -o '"mqtt_topic": *"[^"]*"' /tuya/data/ha_config.json | head -n1 | cut -d'"' -f4)
+    EXIST_M_DISC=$(grep -o '"mqtt_discovery": *[a-z0-9]*' /tuya/data/ha_config.json | head -n1 | awk '{print $2}')
 fi
 
 if [ -z "$HA_URL" ]; then HA_URL="$EXIST_URL"; fi
@@ -112,10 +136,36 @@ case "$HA_TOKEN" in
     ""|*•*|*ZAMASKOWANY*) HA_TOKEN="$EXIST_TOKEN" ;;
 esac
 
+# MQTT Password masking/fallback
+case "$MQTT_PASS" in
+    ""|*•*|*ZAMASKOWANY*) MQTT_PASS="$EXIST_M_PASS" ;;
+esac
+
 if [ -z "$ENTITY_1" ]; then ENTITY_1="${EXIST_E1:-light.living_room}"; fi
 if [ -z "$ENTITY_1_NAME" ]; then ENTITY_1_NAME="${EXIST_E1N:-ŚWIATŁO}"; fi
 if [ -z "$ENTITY_2" ]; then ENTITY_2="${EXIST_E2:-switch.fan}"; fi
 if [ -z "$ENTITY_2_NAME" ]; then ENTITY_2_NAME="${EXIST_E2N:-WENTYLATOR}"; fi
+
+case "$MQTT_ENABLED" in
+    "true"|"1"|"on"|"ON") MQTT_EN_BOOL="true" ;;
+    "false"|"0"|"off"|"OFF") MQTT_EN_BOOL="false" ;;
+    *)
+        if [ -n "$EXIST_M_EN" ]; then MQTT_EN_BOOL="$EXIST_M_EN"; else MQTT_EN_BOOL="false"; fi
+        ;;
+esac
+
+if [ -z "$MQTT_HOST" ]; then MQTT_HOST="$EXIST_M_HOST"; fi
+if [ -z "$MQTT_PORT" ]; then MQTT_PORT="${EXIST_M_PORT:-1883}"; fi
+if [ -z "$MQTT_USER" ]; then MQTT_USER="$EXIST_M_USER"; fi
+if [ -z "$MQTT_TOPIC" ]; then MQTT_TOPIC="${EXIST_M_TOPIC:-panel/tpp01}"; fi
+
+case "$MQTT_DISCOVERY" in
+    "true"|"1"|"on"|"ON") MQTT_DISC_BOOL="true" ;;
+    "false"|"0"|"off"|"OFF") MQTT_DISC_BOOL="false" ;;
+    *)
+        if [ -n "$EXIST_M_DISC" ]; then MQTT_DISC_BOOL="$EXIST_M_DISC"; else MQTT_DISC_BOOL="true"; fi
+        ;;
+esac
 
 # Basic validation
 if [ -z "$HA_URL" ] || [ -z "$HA_TOKEN" ]; then
@@ -137,7 +187,14 @@ cat <<EOF > /tuya/data/ha_config.json
   "entity_1": "$ENTITY_1",
   "entity_1_name": "$ENTITY_1_NAME",
   "entity_2": "$ENTITY_2",
-  "entity_2_name": "$ENTITY_2_NAME"
+  "entity_2_name": "$ENTITY_2_NAME",
+  "mqtt_enabled": $MQTT_EN_BOOL,
+  "mqtt_host": "$MQTT_HOST",
+  "mqtt_port": $MQTT_PORT,
+  "mqtt_user": "$MQTT_USER",
+  "mqtt_pass": "$MQTT_PASS",
+  "mqtt_topic": "$MQTT_TOPIC",
+  "mqtt_discovery": $MQTT_DISC_BOOL
 }
 EOF
 
