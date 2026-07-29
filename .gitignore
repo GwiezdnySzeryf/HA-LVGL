@@ -13,3 +13,12 @@ lvgl/src/**/*.o
 *.tar.xz
 toolchain/
 dummy_write
+
+# Configuration and secrets
+*.json
+!package.json
+ha_config.json
+*.env
+*.key
+*.pem
+*.token
