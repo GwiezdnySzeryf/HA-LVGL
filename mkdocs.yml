@@ -53,7 +53,7 @@ markdown_extensions:
       permalink: true
 
 nav:
-  - Moes Tweaks: moes-tweaks/index.md
+  - Home Assistant LVGL App: home-assistant-lvgl-app/index.md
   - Home: index.md
 
 extra:
