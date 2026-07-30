@@ -22,3 +22,6 @@ ha_config.json
 *.key
 *.pem
 *.token
+
+# MkDocs build output
+site/
