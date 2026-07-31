@@ -16,6 +16,9 @@
 #include <netdb.h>
 #include <dirent.h>
 #include <string>
+#include <map>
+#include <vector>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -88,7 +91,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.8.0";
+const char * CURRENT_VERSION = "v1.8.1";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -110,6 +113,8 @@ static lv_obj_t * wifi_screen = NULL;
 static lv_obj_t * wifi_status_dot = NULL;
 static lv_obj_t * wifi_status_label = NULL;
 static lv_obj_t * wifi_switch = NULL;
+static lv_obj_t * wifi_avail_container = NULL;
+static lv_obj_t * wifi_scan_btn_label = NULL;
 static bool wifi_interface_enabled = true;
 static bool wifi_static_ip_mode = false;
 static lv_obj_t * display_auto_switch = NULL;
@@ -144,6 +149,7 @@ LV_FONT_DECLARE(lv_font_montserrat_24_pl);
 #define ICON_WIFI       "\xEF\x87\xAB"
 #define ICON_BLUETOOTH  "\xEF\x8A\x93"
 #define ICON_PALETTE    "\xEF\x94\xBF"
+#define ICON_REFRESH    "\xEF\x80\xA1"
 
 // Helper function to get panel IP address dynamically across all interfaces
 std::string get_wlan0_ip() {
@@ -1398,6 +1404,8 @@ static void close_wifi_screen(void) {
         wifi_status_dot = NULL;
         wifi_status_label = NULL;
         wifi_switch = NULL;
+        wifi_avail_container = NULL;
+        wifi_scan_btn_label = NULL;
     }
 }
 
@@ -2303,6 +2311,253 @@ static void open_ip_modal_cb(lv_event_t * e) {
     settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
 }
 
+struct WifiNetworkInfo {
+    std::string ssid;
+    std::string bssid;
+    int rssi;
+    std::string flags;
+};
+
+struct WifiConnectData {
+    std::string ssid;
+    lv_obj_t * modal;
+    lv_obj_t * ta_pass;
+};
+
+static std::string unescape_wpa_ssid(const std::string & input) {
+    std::string out;
+    out.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '\\' && i + 3 < input.size() && input[i+1] == 'x') {
+            char hex[3] = { input[i+2], input[i+3], '\0' };
+            char * end = NULL;
+            long val = strtol(hex, &end, 16);
+            if (end == hex + 2) {
+                out.push_back((char)val);
+                i += 3;
+                continue;
+            }
+        }
+        out.push_back(input[i]);
+    }
+    return out;
+}
+
+static void wifi_connect_action_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    WifiConnectData * data = (WifiConnectData *)lv_event_get_user_data(e);
+    if (!data) return;
+
+    std::string ssid = data->ssid;
+    std::string pass = data->ta_pass ? lv_textarea_get_text(data->ta_pass) : "";
+    lv_obj_t * modal = data->modal;
+
+    std::thread([ssid, pass]() {
+        std::string cmd_add = exec_cmd_line("wpa_cli -i wlan0 add_network 2>/dev/null | tail -n 1");
+        int net_id = atoi(cmd_add.c_str());
+
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d ssid '\"%s\"'", net_id, ssid.c_str());
+        system(cmd);
+
+        if (!pass.empty()) {
+            snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d psk '\"%s\"'", net_id, pass.c_str());
+        } else {
+            snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d key_mgmt NONE", net_id);
+        }
+        system(cmd);
+
+        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 enable_network %d", net_id);
+        system(cmd);
+        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 select_network %d", net_id);
+        system(cmd);
+        system("wpa_cli -i wlan0 save_config 2>/dev/null");
+        system("udhcpc -i wlan0 -q -n -t 5 2>/dev/null &");
+    }).detach();
+
+    if (modal) lv_obj_del_async(modal);
+    delete data;
+}
+
+static void open_wifi_connect_modal(const std::string & target_ssid) {
+    lv_obj_t * modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(modal, 480, 480);
+    lv_obj_set_pos(modal, 0, 0);
+    settings_m3_surface(modal, lv_color_make(0x11, 0x13, 0x18), 0);
+
+    lv_obj_t * back = lv_btn_create(modal);
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_pos(back, 12, 11);
+    settings_m3_surface(back, M3_SURFACE_HIGH, 24);
+    lv_obj_add_event_cb(back, wifi_close_modal_cb, LV_EVENT_CLICKED, modal);
+    lv_obj_t * back_icon = settings_m3_label(back, ICON_BACK, 0, 0, M3_ON_SURFACE, &lv_font_control_icons_24);
+    lv_obj_center(back_icon);
+
+    settings_m3_label(modal, "Połącz z siecią", 76, 22, M3_ON_SURFACE, &lv_font_montserrat_24_pl);
+
+    lv_obj_t * card = settings_m3_card(modal, 20, 76, 440, 150);
+    settings_m3_label(card, "SIEĆ WI-FI", 16, 12, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    settings_m3_label(card, target_ssid.c_str(), 16, 30, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+
+    settings_m3_label(card, "HASŁO DO SIECI", 16, 68, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_t * ta_pass = lv_textarea_create(card);
+    lv_obj_set_size(ta_pass, 408, 44);
+    lv_obj_set_pos(ta_pass, 16, 92);
+    lv_textarea_set_one_line(ta_pass, true);
+    lv_textarea_set_password_mode(ta_pass, true);
+    lv_textarea_set_placeholder_text(ta_pass, "Wpisz hasło Wi-Fi...");
+    lv_obj_set_style_text_font(ta_pass, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ta_pass, M3_SURFACE_HIGH, LV_PART_MAIN);
+    lv_obj_set_style_border_color(ta_pass, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_radius(ta_pass, 12, LV_PART_MAIN);
+
+    lv_obj_t * kb = lv_keyboard_create(modal);
+    lv_obj_set_size(kb, 480, 180);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, -52);
+    lv_keyboard_set_textarea(kb, ta_pass);
+
+    WifiConnectData * conn_data = new WifiConnectData{target_ssid, modal, ta_pass};
+
+    lv_obj_t * connect_btn = lv_btn_create(modal);
+    lv_obj_set_size(connect_btn, 212, 44);
+    lv_obj_set_pos(connect_btn, 248, 428);
+    settings_m3_surface(connect_btn, M3_PRIMARY, 22);
+    lv_obj_t * conn_lbl = settings_m3_label(connect_btn, "Połącz", 0, 0, M3_ON_PRIMARY, &lv_font_montserrat_16_pl);
+    lv_obj_center(conn_lbl);
+    lv_obj_add_event_cb(connect_btn, wifi_connect_action_cb, LV_EVENT_CLICKED, conn_data);
+
+    lv_obj_t * cancel_btn = lv_btn_create(modal);
+    lv_obj_set_size(cancel_btn, 212, 44);
+    lv_obj_set_pos(cancel_btn, 20, 428);
+    settings_m3_surface(cancel_btn, M3_SURFACE_HIGH, 22);
+    lv_obj_t * canc_lbl = settings_m3_label(cancel_btn, "Anuluj", 0, 0, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    lv_obj_center(canc_lbl);
+    lv_obj_add_event_cb(cancel_btn, wifi_close_modal_cb, LV_EVENT_CLICKED, modal);
+}
+
+static void wifi_connect_item_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    const char * ssid = (const char *)lv_event_get_user_data(e);
+    if (ssid) {
+        open_wifi_connect_modal(std::string(ssid));
+    }
+}
+
+static void render_wifi_scan_results_timer_cb(lv_timer_t * timer) {
+    lv_timer_del(timer);
+
+    if (wifi_scan_btn_label) {
+        lv_label_set_text(wifi_scan_btn_label, "Odśwież listę sieci Wi-Fi");
+    }
+
+    if (!wifi_avail_container) return;
+
+    lv_obj_clean(wifi_avail_container);
+
+    std::string current_ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+
+    std::string raw = exec_cmd_line("wpa_cli -i wlan0 scan_results 2>/dev/null");
+    std::stringstream ss(raw);
+    std::string line;
+    bool first = true;
+    std::map<std::string, WifiNetworkInfo> unique_ssids;
+
+    while (std::getline(ss, line)) {
+        if (first) { first = false; continue; }
+        if (line.empty()) continue;
+
+        std::vector<std::string> tokens;
+        std::stringstream line_ss(line);
+        std::string token;
+        while (std::getline(line_ss, token, '\t')) {
+            tokens.push_back(token);
+        }
+
+        if (tokens.size() >= 5) {
+            std::string bssid = tokens[0];
+            int rssi = atoi(tokens[2].c_str());
+            std::string flags = tokens[3];
+            std::string raw_ssid = tokens[4];
+
+            while (!raw_ssid.empty() && (raw_ssid.back() == '\r' || raw_ssid.back() == '\n')) raw_ssid.pop_back();
+            std::string ssid = unescape_wpa_ssid(raw_ssid);
+
+            if (ssid.empty()) continue;
+
+            if (unique_ssids.find(ssid) == unique_ssids.end() || rssi > unique_ssids[ssid].rssi) {
+                WifiNetworkInfo net;
+                net.ssid = ssid;
+                net.bssid = bssid;
+                net.rssi = rssi;
+                net.flags = flags;
+                unique_ssids[ssid] = net;
+            }
+        }
+    }
+
+    std::vector<WifiNetworkInfo> networks;
+    for (auto const & pair : unique_ssids) {
+        if (pair.first != current_ssid) {
+            networks.push_back(pair.second);
+        }
+    }
+
+    std::sort(networks.begin(), networks.end(), [](const WifiNetworkInfo & a, const WifiNetworkInfo & b) {
+        return a.rssi > b.rssi;
+    });
+
+    int y = 0;
+    if (networks.empty()) {
+        lv_obj_t * empty_card = settings_m3_card(wifi_avail_container, 20, y, 440, 56);
+        settings_m3_label(empty_card, "Brak dodatkowych sieci w zasięgu", 16, 18, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+        y += 64;
+    } else {
+        for (size_t i = 0; i < networks.size(); ++i) {
+            const auto & net = networks[i];
+            lv_obj_t * item = settings_m3_card(wifi_avail_container, 20, y, 440, 68);
+
+            lv_obj_t * name_lbl = settings_m3_label(item, net.ssid.c_str(), 16, 12, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+            lv_obj_set_width(name_lbl, 260);
+
+            std::string signal_desc;
+            if (net.rssi >= -50) signal_desc = "Sygnał: Bardzo silny (" + std::to_string(net.rssi) + " dBm)";
+            else if (net.rssi >= -65) signal_desc = "Sygnał: Dobry (" + std::to_string(net.rssi) + " dBm)";
+            else if (net.rssi >= -80) signal_desc = "Sygnał: Dostateczny (" + std::to_string(net.rssi) + " dBm)";
+            else signal_desc = "Sygnał: Słaby (" + std::to_string(net.rssi) + " dBm)";
+
+            settings_m3_label(item, signal_desc.c_str(), 16, 38, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+
+            lv_obj_t * conn_btn = lv_btn_create(item);
+            lv_obj_set_size(conn_btn, 92, 36);
+            lv_obj_set_pos(conn_btn, 332, 16);
+            settings_m3_surface(conn_btn, M3_SURFACE_HIGH, 18);
+            lv_obj_set_style_border_color(conn_btn, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+            lv_obj_set_style_border_width(conn_btn, 1, LV_PART_MAIN);
+
+            lv_obj_t * lbl = settings_m3_label(conn_btn, "Połącz", 0, 0, M3_PRIMARY, &lv_font_montserrat_14_pl);
+            lv_obj_center(lbl);
+
+            char * ssid_copy = strdup(net.ssid.c_str());
+            lv_obj_add_event_cb(conn_btn, wifi_connect_item_btn_cb, LV_EVENT_CLICKED, ssid_copy);
+
+            y += 76;
+        }
+    }
+
+    lv_obj_set_height(wifi_avail_container, y + 10);
+}
+
+static void wifi_scan_refresh_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    if (wifi_scan_btn_label) {
+        lv_label_set_text(wifi_scan_btn_label, "Skanowanie sieci...");
+    }
+
+    system("wpa_cli -i wlan0 scan 2>/dev/null &");
+    lv_timer_create(render_wifi_scan_results_timer_cb, 1200, NULL);
+}
+
 static void create_wifi_screen(void) {
     if (wifi_screen) return;
 
@@ -2384,10 +2639,27 @@ static void create_wifi_screen(void) {
     }
 
     y += 84;
-    lv_obj_t * spacer = lv_obj_create(list);
-    lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, y);
-    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
+    lv_obj_t * avail_hdr = settings_m3_label(list, "DOSTĘPNE SIECI", 24, y, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_set_style_text_letter_space(avail_hdr, 1, LV_PART_MAIN);
+
+    y += 24;
+    lv_obj_t * scan_card = settings_m3_card(list, 20, y, 440, 52);
+    lv_obj_add_flag(scan_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(scan_card, M3_SURFACE_HIGH, LV_PART_MAIN | LV_STATE_PRESSED);
+    wifi_scan_btn_label = settings_m3_label(scan_card, "Skanowanie sieci...", 16, 16, M3_PRIMARY, &lv_font_montserrat_16_pl);
+    icon_badge(scan_card, ICON_REFRESH, 388, 10, lv_color_hex(0x1F2A30), M3_PRIMARY);
+    lv_obj_add_event_cb(scan_card, wifi_scan_refresh_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    y += 60;
+    wifi_avail_container = lv_obj_create(list);
+    lv_obj_set_size(wifi_avail_container, 480, 100);
+    lv_obj_set_pos(wifi_avail_container, 0, y);
+    settings_m3_surface(wifi_avail_container, lv_color_make(0x11, 0x13, 0x18), 0);
+    lv_obj_clear_flag(wifi_avail_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Initial async scan on opening Wi-Fi screen
+    system("wpa_cli -i wlan0 scan 2>/dev/null &");
+    lv_timer_create(render_wifi_scan_results_timer_cb, 1200, NULL);
 }
 
 static lv_obj_t * web_portal_screen = NULL;
