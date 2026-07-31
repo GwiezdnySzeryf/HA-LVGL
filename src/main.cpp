@@ -7,12 +7,14 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <sys/file.h>
 #include <signal.h>
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <netdb.h>
+#include <dirent.h>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -20,6 +22,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <ctype.h>
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
@@ -45,8 +48,16 @@ extern "C" uint32_t custom_tick_get(void);
 MqttClient g_mqtt_client;
 MqttConfig g_mqtt_config;
 bool g_web_autostart = true;
+bool g_ha_autostart = false;
+bool g_cgi_mode = false;
 
 static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
+static bool auto_brightness_enabled = false;
+static int manual_brightness_percent = 80;
+static int auto_brightness_percent = 80;
+static float filtered_ambient_lux = -1.0f;
+static std::string ambient_raw_path;
+static std::string ambient_scale_path;
 
 static void screensaver_timer_cb(lv_timer_t * timer) {
     (void)timer;
@@ -77,10 +88,11 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.7.0";
+const char * CURRENT_VERSION = "v1.8.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
+static lv_obj_t * brightness_slider = NULL;
 static lv_obj_t * volume_value_label = NULL;
 static int control_center_drag_start_y = 0;
 static int control_center_drag_start_panel_y = -480;
@@ -93,11 +105,28 @@ static lv_obj_t * settings_screen = NULL;
 static lv_obj_t * updates_screen = NULL;
 static lv_obj_t * diagnostics_screen = NULL;
 static lv_obj_t * info_screen = NULL;
+static lv_obj_t * display_screen = NULL;
+static lv_obj_t * wifi_screen = NULL;
+static lv_obj_t * wifi_status_dot = NULL;
+static lv_obj_t * wifi_status_label = NULL;
+static lv_obj_t * wifi_switch = NULL;
+static bool wifi_interface_enabled = true;
+static bool wifi_static_ip_mode = false;
+static lv_obj_t * display_auto_switch = NULL;
+static lv_obj_t * display_auto_status_label = NULL;
+static lv_obj_t * display_brightness_slider = NULL;
+static lv_obj_t * display_brightness_label = NULL;
+static lv_obj_t * display_timeout_buttons[4] = {NULL, NULL, NULL, NULL};
+static const int display_timeout_values[4] = {15, 30, 60, 0};
 
 // Declare external native image data
 extern const lv_img_dsc_t ha_logo;
 LV_FONT_DECLARE(lv_font_control_icons_24);
+LV_FONT_DECLARE(lv_font_montserrat_12_pl);
+LV_FONT_DECLARE(lv_font_montserrat_14_pl);
 LV_FONT_DECLARE(lv_font_montserrat_16_pl);
+LV_FONT_DECLARE(lv_font_montserrat_20_pl);
+LV_FONT_DECLARE(lv_font_montserrat_24_pl);
 
 #define ICON_BRIGHTNESS "\xEF\x86\x85"
 #define ICON_VOLUME     "\xEF\x80\xA8"
@@ -162,7 +191,20 @@ bool config_exists() {
     return access("/tuya/data/ha_config.json", F_OK) == 0;
 }
 
-// Lightweight JSON value parser using string searches to avoid heavy parser link dependencies
+static void append_utf8(std::string &output, unsigned int codepoint) {
+    if (codepoint <= 0x7f) {
+        output.push_back((char)codepoint);
+    } else if (codepoint <= 0x7ff) {
+        output.push_back((char)(0xc0 | (codepoint >> 6)));
+        output.push_back((char)(0x80 | (codepoint & 0x3f)));
+    } else {
+        output.push_back((char)(0xe0 | (codepoint >> 12)));
+        output.push_back((char)(0x80 | ((codepoint >> 6) & 0x3f)));
+        output.push_back((char)(0x80 | (codepoint & 0x3f)));
+    }
+}
+
+// Lightweight JSON string parser with escape handling, avoiding a heavy JSON dependency.
 std::string parse_json_value(const std::string &json, const std::string &key) {
     size_t key_pos = json.find("\"" + key + "\"");
     if (key_pos == std::string::npos) return "";
@@ -173,10 +215,70 @@ std::string parse_json_value(const std::string &json, const std::string &key) {
     size_t start_quote = json.find("\"", colon_pos);
     if (start_quote == std::string::npos) return "";
     
-    size_t end_quote = json.find("\"", start_quote + 1);
-    if (end_quote == std::string::npos) return "";
-    
-    return json.substr(start_quote + 1, end_quote - start_quote - 1);
+    std::string value;
+    for (size_t i = start_quote + 1; i < json.size(); i++) {
+        char c = json[i];
+        if (c == '"') return value;
+        if (c != '\\') {
+            value.push_back(c);
+            continue;
+        }
+        if (++i >= json.size()) return "";
+        char escaped = json[i];
+        switch (escaped) {
+            case '"': value.push_back('"'); break;
+            case '\\': value.push_back('\\'); break;
+            case '/': value.push_back('/'); break;
+            case 'b': value.push_back('\b'); break;
+            case 'f': value.push_back('\f'); break;
+            case 'n': value.push_back('\n'); break;
+            case 'r': value.push_back('\r'); break;
+            case 't': value.push_back('\t'); break;
+            case 'u': {
+                if (i + 4 >= json.size()) return "";
+                unsigned int codepoint = 0;
+                for (int n = 0; n < 4; n++) {
+                    char hex = json[++i];
+                    codepoint <<= 4;
+                    if (hex >= '0' && hex <= '9') codepoint |= (unsigned int)(hex - '0');
+                    else if (hex >= 'a' && hex <= 'f') codepoint |= (unsigned int)(hex - 'a' + 10);
+                    else if (hex >= 'A' && hex <= 'F') codepoint |= (unsigned int)(hex - 'A' + 10);
+                    else return "";
+                }
+                append_utf8(value, codepoint);
+                break;
+            }
+            default: return "";
+        }
+    }
+    return "";
+}
+
+static std::string json_escape(const std::string &value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < value.size(); i++) {
+        unsigned char c = (unsigned char)value[i];
+        switch (c) {
+            case '"': escaped += "\\\""; break;
+            case '\\': escaped += "\\\\"; break;
+            case '\b': escaped += "\\b"; break;
+            case '\f': escaped += "\\f"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    escaped += "\\u00";
+                    escaped.push_back(hex[c >> 4]);
+                    escaped.push_back(hex[c & 0x0f]);
+                } else {
+                    escaped.push_back((char)c);
+                }
+        }
+    }
+    return escaped;
 }
 
 size_t parse_json_int_value(const std::string &json, const std::string &key) {
@@ -248,35 +350,347 @@ bool load_configuration() {
     g_mqtt_config.discovery = parse_json_bool_value(json, "mqtt_discovery", true);
 
     g_web_autostart = parse_json_bool_value(json, "web_autostart", true);
+    g_ha_autostart = parse_json_bool_value(json, "ha_autostart", false);
 
-    printf("[Config] MQTT enabled=%d, host='%s', port=%d, topic='%s', web_autostart=%d\n",
-           g_mqtt_config.enabled, g_mqtt_config.host.c_str(), g_mqtt_config.port, g_mqtt_config.base_topic.c_str(), g_web_autostart);
+    if (!g_cgi_mode) {
+        printf("[Config] MQTT enabled=%d, host='%s', port=%d, topic='%s', web_autostart=%d\n",
+               g_mqtt_config.enabled, g_mqtt_config.host.c_str(), g_mqtt_config.port, g_mqtt_config.base_topic.c_str(), g_web_autostart);
+    }
 
     return !ha_url.empty() && !ha_token.empty();
 }
 
-void save_configuration() {
-    std::ofstream f("/tuya/data/ha_config.json");
-    if (!f.is_open()) return;
+bool save_configuration() {
+    std::string temp_path = "/tuya/data/ha_config.json.tmp." + std::to_string((long long)getpid());
+    std::ofstream f(temp_path.c_str(), std::ios::out | std::ios::trunc);
+    if (!f.is_open()) return false;
 
     f << "{\n"
-      << "  \"ha_url\": \"" << ha_url << "\",\n"
-      << "  \"ha_token\": \"" << ha_token << "\",\n"
-      << "  \"entity_1\": \"" << ha_entity_1 << "\",\n"
-      << "  \"entity_1_name\": \"" << ha_entity_1_name << "\",\n"
-      << "  \"entity_2\": \"" << ha_entity_2 << "\",\n"
-      << "  \"entity_2_name\": \"" << ha_entity_2_name << "\",\n"
+      << "  \"ha_url\": \"" << json_escape(ha_url) << "\",\n"
+      << "  \"ha_token\": \"" << json_escape(ha_token) << "\",\n"
+      << "  \"entity_1\": \"" << json_escape(ha_entity_1) << "\",\n"
+      << "  \"entity_1_name\": \"" << json_escape(ha_entity_1_name) << "\",\n"
+      << "  \"entity_2\": \"" << json_escape(ha_entity_2) << "\",\n"
+      << "  \"entity_2_name\": \"" << json_escape(ha_entity_2_name) << "\",\n"
       << "  \"mqtt_enabled\": " << (g_mqtt_config.enabled ? "true" : "false") << ",\n"
-      << "  \"mqtt_host\": \"" << g_mqtt_config.host << "\",\n"
+      << "  \"mqtt_host\": \"" << json_escape(g_mqtt_config.host) << "\",\n"
       << "  \"mqtt_port\": " << g_mqtt_config.port << ",\n"
-      << "  \"mqtt_user\": \"" << g_mqtt_config.username << "\",\n"
-      << "  \"mqtt_pass\": \"" << g_mqtt_config.password << "\",\n"
-      << "  \"mqtt_topic\": \"" << g_mqtt_config.base_topic << "\",\n"
+      << "  \"mqtt_user\": \"" << json_escape(g_mqtt_config.username) << "\",\n"
+      << "  \"mqtt_pass\": \"" << json_escape(g_mqtt_config.password) << "\",\n"
+      << "  \"mqtt_topic\": \"" << json_escape(g_mqtt_config.base_topic) << "\",\n"
       << "  \"mqtt_discovery\": " << (g_mqtt_config.discovery ? "true" : "false") << ",\n"
-      << "  \"web_autostart\": " << (g_web_autostart ? "true" : "false") << "\n"
+      << "  \"web_autostart\": " << (g_web_autostart ? "true" : "false") << ",\n"
+      << "  \"ha_autostart\": " << (g_ha_autostart ? "true" : "false") << "\n"
       << "}\n";
     f.close();
-    chmod("/tuya/data/ha_config.json", 0600);
+    if (!f) {
+        unlink(temp_path.c_str());
+        return false;
+    }
+    chmod(temp_path.c_str(), 0600);
+    if (rename(temp_path.c_str(), "/tuya/data/ha_config.json") != 0) {
+        unlink(temp_path.c_str());
+        return false;
+    }
+    return true;
+}
+
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static std::string url_decode(const std::string &value) {
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (size_t i = 0; i < value.size(); i++) {
+        if (value[i] == '+') {
+            decoded.push_back(' ');
+        } else if (value[i] == '%' && i + 2 < value.size()) {
+            int high = hex_value(value[i + 1]);
+            int low = hex_value(value[i + 2]);
+            if (high >= 0 && low >= 0) {
+                decoded.push_back((char)((high << 4) | low));
+                i += 2;
+            } else {
+                decoded.push_back(value[i]);
+            }
+        } else {
+            decoded.push_back(value[i]);
+        }
+    }
+    return decoded;
+}
+
+static std::string form_value(const std::string &body, const std::string &key) {
+    size_t start = 0;
+    while (start <= body.size()) {
+        size_t end = body.find('&', start);
+        if (end == std::string::npos) end = body.size();
+        size_t equals = body.find('=', start);
+        if (equals != std::string::npos && equals < end && url_decode(body.substr(start, equals - start)) == key) {
+            return url_decode(body.substr(equals + 1, end - equals - 1));
+        }
+        if (end == body.size()) break;
+        start = end + 1;
+    }
+    return "";
+}
+
+static std::string trim_copy(const std::string &value) {
+    size_t start = 0;
+    size_t end = value.size();
+    while (start < end && isspace((unsigned char)value[start])) start++;
+    while (end > start && isspace((unsigned char)value[end - 1])) end--;
+    return value.substr(start, end - start);
+}
+
+static bool form_bool(const std::string &body, const std::string &key) {
+    std::string value = form_value(body, key);
+    return value == "true" || value == "1" || value == "on";
+}
+
+static bool valid_entity_id(const std::string &value) {
+    size_t dot = value.find('.');
+    if (value.empty() || value.size() > 128 || dot == std::string::npos || dot == 0 || dot == value.size() - 1) return false;
+    for (size_t i = 0; i < value.size(); i++) {
+        unsigned char c = (unsigned char)value[i];
+        if (!(isalnum(c) || c == '_' || c == '.')) return false;
+    }
+    return true;
+}
+
+static void cgi_json_response(int status, const std::string &json) {
+    if (status != 200) {
+        const char *reason = status == 403 ? "Forbidden" : (status == 500 ? "Internal Server Error" : "Bad Request");
+        printf("Status: %d %s\r\n", status, reason);
+    }
+    printf("Content-Type: application/json; charset=utf-8\r\n");
+    printf("Cache-Control: no-store\r\n\r\n");
+    printf("%s\n", json.c_str());
+}
+
+static int cgi_config_main(void) {
+    const char *method = getenv("REQUEST_METHOD");
+    if (!method || std::string(method) != "POST") {
+        cgi_json_response(400, "{\"ok\":false,\"error\":\"POST required\"}");
+        return 1;
+    }
+    const char *requested_with = getenv("HTTP_X_REQUESTED_WITH");
+    if (!requested_with || std::string(requested_with) != "TPP01-Panel") {
+        cgi_json_response(403, "{\"ok\":false,\"error\":\"Invalid request origin\"}");
+        return 1;
+    }
+
+    long content_length = 0;
+    const char *length_value = getenv("CONTENT_LENGTH");
+    if (length_value) content_length = strtol(length_value, NULL, 10);
+    if (content_length <= 0 || content_length > 16384) {
+        cgi_json_response(400, "{\"ok\":false,\"error\":\"Invalid request size\"}");
+        return 1;
+    }
+
+    std::string body((size_t)content_length, '\0');
+    if (fread(&body[0], 1, (size_t)content_length, stdin) != (size_t)content_length) {
+        cgi_json_response(400, "{\"ok\":false,\"error\":\"Incomplete request\"}");
+        return 1;
+    }
+
+    int lock_fd = open("/tuya/data/ha_config.lock", O_CREAT | O_RDWR, 0600);
+    if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
+        if (lock_fd >= 0) close(lock_fd);
+        cgi_json_response(500, "{\"ok\":false,\"error\":\"Configuration is busy\"}");
+        return 1;
+    }
+
+    if (config_exists()) load_configuration();
+    std::string section = form_value(body, "section");
+    std::string error;
+    std::string field;
+
+    if (section == "ha") {
+        bool disconnect = form_bool(body, "disconnect");
+        std::string new_url = trim_copy(form_value(body, "ha_url"));
+        std::string new_token = trim_copy(form_value(body, "ha_token"));
+        std::string new_entity_1 = trim_copy(form_value(body, "entity_1"));
+        std::string new_entity_2 = trim_copy(form_value(body, "entity_2"));
+        std::string new_name_1 = trim_copy(form_value(body, "entity_1_name"));
+        std::string new_name_2 = trim_copy(form_value(body, "entity_2_name"));
+
+        if (disconnect) {
+            ha_url.clear();
+            ha_token.clear();
+            ha_entity_1.clear();
+            ha_entity_2.clear();
+        } else if (!(new_url.compare(0, 7, "http://") == 0 || new_url.compare(0, 8, "https://") == 0) || new_url.size() > 512) {
+            field = "ha_url"; error = "Invalid Home Assistant URL";
+        } else if (new_token.empty() && ha_token.empty()) {
+            field = "ha_token"; error = "Access token is required";
+        } else if (!valid_entity_id(new_entity_1)) {
+            field = "entity_1"; error = "Invalid first entity ID";
+        } else if (!valid_entity_id(new_entity_2)) {
+            field = "entity_2"; error = "Invalid second entity ID";
+        } else if (new_name_1.empty() || new_name_1.size() > 64 || new_name_2.empty() || new_name_2.size() > 64) {
+            field = "entity_names"; error = "Entity names must contain 1 to 64 bytes";
+        } else {
+            ha_url = new_url;
+            if (!new_token.empty()) ha_token = new_token;
+            ha_entity_1 = new_entity_1;
+            ha_entity_1_name = new_name_1;
+            ha_entity_2 = new_entity_2;
+            ha_entity_2_name = new_name_2;
+        }
+    } else if (section == "mqtt") {
+        std::string host = trim_copy(form_value(body, "mqtt_host"));
+        std::string port_text = trim_copy(form_value(body, "mqtt_port"));
+        std::string username = form_value(body, "mqtt_user");
+        std::string password = form_value(body, "mqtt_pass");
+        std::string topic = trim_copy(form_value(body, "mqtt_topic"));
+        char *port_end = NULL;
+        long port = strtol(port_text.c_str(), &port_end, 10);
+        bool enabled = form_bool(body, "mqtt_enabled");
+
+        if (enabled && (host.empty() || host.size() > 255)) {
+            field = "mqtt_host"; error = "MQTT host is required";
+        } else if (port_text.empty() || !port_end || *port_end != '\0' || port < 1 || port > 65535) {
+            field = "mqtt_port"; error = "MQTT port must be between 1 and 65535";
+        } else if (username.size() > 255 || password.size() > 512) {
+            field = "mqtt_credentials"; error = "MQTT credentials are too long";
+        } else if (topic.empty() || topic.size() > 255) {
+            field = "mqtt_topic"; error = "MQTT base topic is required";
+        } else {
+            g_mqtt_config.enabled = enabled;
+            g_mqtt_config.host = host;
+            g_mqtt_config.port = (int)port;
+            g_mqtt_config.username = username;
+            if (!password.empty()) g_mqtt_config.password = password;
+            g_mqtt_config.base_topic = topic;
+            g_mqtt_config.discovery = form_bool(body, "mqtt_discovery");
+        }
+    } else if (section == "system") {
+        g_web_autostart = form_bool(body, "web_autostart");
+        g_ha_autostart = form_bool(body, "ha_autostart");
+    } else {
+        field = "section"; error = "Unknown configuration section";
+    }
+
+    bool saved = false;
+    if (error.empty()) saved = save_configuration();
+    flock(lock_fd, LOCK_UN);
+    close(lock_fd);
+
+    if (!error.empty()) {
+        cgi_json_response(400, "{\"ok\":false,\"field\":\"" + json_escape(field) + "\",\"error\":\"" + json_escape(error) + "\"}");
+        return 1;
+    }
+    if (!saved) {
+        cgi_json_response(500, "{\"ok\":false,\"error\":\"Unable to save configuration\"}");
+        return 1;
+    }
+
+    cgi_json_response(200, "{\"ok\":true,\"section\":\"" + json_escape(section) + "\",\"restart_required\":true}");
+    return 0;
+}
+
+static std::string read_text_file(const char *path) {
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    if (!file.is_open()) return "";
+    std::stringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
+}
+
+static int cgi_status_main(void) {
+    if (config_exists()) load_configuration();
+
+    std::string logs = read_text_file("/tmp/ha_panel.log");
+    size_t ha_ok = logs.rfind("AUTH OK");
+    size_t ha_closed = logs.rfind("Connection closed");
+    size_t ha_required = logs.rfind("auth_required");
+    bool ha_connected = ha_ok != std::string::npos &&
+                        (ha_closed == std::string::npos || ha_ok > ha_closed) &&
+                        (ha_required == std::string::npos || ha_ok > ha_required);
+
+    size_t mqtt_ok = logs.rfind("Connected successfully to broker");
+    size_t mqtt_failed = logs.rfind("Socket connection failed");
+    bool mqtt_connected = mqtt_ok != std::string::npos &&
+                          (mqtt_failed == std::string::npos || mqtt_ok > mqtt_failed);
+
+    long uptime_seconds = 0;
+    std::ifstream uptime_file("/proc/uptime");
+    if (uptime_file.is_open()) uptime_file >> uptime_seconds;
+
+    int brightness = 0;
+    int max_brightness = 255;
+    std::ifstream brightness_file("/sys/class/backlight/backlight/brightness");
+    std::ifstream max_brightness_file("/sys/class/backlight/backlight/max_brightness");
+    if (brightness_file.is_open()) brightness_file >> brightness;
+    if (max_brightness_file.is_open()) max_brightness_file >> max_brightness;
+    int brightness_percent = max_brightness > 0 ? (brightness * 100 + max_brightness / 2) / max_brightness : 0;
+
+    bool app_running = false;
+    FILE * pid_pipe = popen("pidof ha_panel", "r");
+    if (pid_pipe) {
+        int pid = 0;
+        while (fscanf(pid_pipe, "%d", &pid) == 1) {
+            if (pid != (int)getpid()) app_running = true;
+        }
+        pclose(pid_pipe);
+    }
+
+    std::string active_app = "none";
+    if (app_running) {
+        active_app = "ha_panel";
+    } else {
+        FILE * ps_pipe = popen("ps w | grep -v grep | grep -E 'voice_control'", "r");
+        if (ps_pipe) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), ps_pipe)) {
+                std::string line = buf;
+                if (line.find(" Z ") != std::string::npos) continue;
+                if (line.find("voice_control_factory") != std::string::npos) {
+                    active_app = "tuya_factory";
+                    break;
+                } else if (line.find("voice_control") != std::string::npos) {
+                    active_app = "tuya_gui";
+                    break;
+                }
+            }
+            pclose(ps_pipe);
+        }
+    }
+
+    std::stringstream json;
+    json << "{"
+         << "\"ip\":\"" << json_escape(get_wlan0_ip()) << "\","
+         << "\"version\":\"" << json_escape(CURRENT_VERSION) << "\","
+         << "\"uptime_seconds\":" << uptime_seconds << ","
+         << "\"brightness\":" << brightness_percent << ","
+         << "\"app_running\":" << (app_running ? "true" : "false") << ","
+         << "\"ha_configured\":" << (!ha_url.empty() && !ha_token.empty() ? "true" : "false") << ","
+         << "\"ha_connected\":" << (ha_connected ? "true" : "false") << ","
+         << "\"ha_token_set\":" << (!ha_token.empty() ? "true" : "false") << ","
+         << "\"ha_url\":\"" << json_escape(ha_url) << "\","
+         << "\"entity_1\":\"" << json_escape(ha_entity_1) << "\","
+         << "\"entity_1_name\":\"" << json_escape(ha_entity_1_name) << "\","
+         << "\"entity_2\":\"" << json_escape(ha_entity_2) << "\","
+         << "\"entity_2_name\":\"" << json_escape(ha_entity_2_name) << "\","
+         << "\"mqtt_enabled\":" << (g_mqtt_config.enabled ? "true" : "false") << ","
+         << "\"mqtt_connected\":" << (mqtt_connected ? "true" : "false") << ","
+         << "\"mqtt_host\":\"" << json_escape(g_mqtt_config.host) << "\","
+         << "\"mqtt_port\":" << g_mqtt_config.port << ","
+         << "\"mqtt_user\":\"" << json_escape(g_mqtt_config.username) << "\","
+         << "\"mqtt_pass_set\":" << (!g_mqtt_config.password.empty() ? "true" : "false") << ","
+         << "\"mqtt_topic\":\"" << json_escape(g_mqtt_config.base_topic) << "\","
+         << "\"mqtt_discovery\":" << (g_mqtt_config.discovery ? "true" : "false") << ","
+         << "\"web_autostart\":" << (g_web_autostart ? "true" : "false") << ","
+         << "\"ha_autostart\":" << (g_ha_autostart ? "true" : "false") << ","
+         << "\"active_app\":\"" << json_escape(active_app) << "\""
+         << "}";
+    cgi_json_response(200, json.str());
+    return 0;
 }
 
 struct HaControl {
@@ -852,6 +1266,8 @@ static void ota_update_timer_cb(lv_timer_t * timer) {
 enum settings_action_t {
     SETTINGS_ACTION_NONE = 0,
     SETTINGS_ACTION_CONTROLS,
+    SETTINGS_ACTION_DISPLAY,
+    SETTINGS_ACTION_WIFI,
     SETTINGS_ACTION_DIAGNOSTICS,
     SETTINGS_ACTION_INFO,
     SETTINGS_ACTION_UPDATES,
@@ -863,8 +1279,14 @@ static void create_updates_screen(void);
 static void create_diagnostics_screen(void);
 static void create_info_screen(void);
 static void create_mqtt_screen(void);
+static void create_display_screen(void);
+static void create_wifi_screen(void);
+static void close_wifi_screen(void);
 static void create_web_portal_screen(void);
 static void close_web_portal_screen(void);
+static int read_int_file(const char * path, int fallback);
+static void set_percent_label(lv_obj_t * label, int value);
+static void set_auto_brightness_enabled(bool enabled);
 
 static lv_obj_t * mqtt_screen = NULL;
 static lv_obj_t * mqtt_kb = NULL;
@@ -900,6 +1322,7 @@ static void mqtt_ta_event_cb(lv_event_t * e) {
             mqtt_kb = lv_keyboard_create(lv_layer_top());
             lv_obj_set_size(mqtt_kb, 480, 220);
             lv_obj_align(mqtt_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_set_style_text_font(mqtt_kb, &lv_font_montserrat_16_pl, LV_PART_ITEMS);
         }
         lv_keyboard_set_textarea(mqtt_kb, ta);
         lv_obj_clear_flag(mqtt_kb, LV_OBJ_FLAG_HIDDEN);
@@ -956,10 +1379,34 @@ static void close_info_screen(void) {
     }
 }
 
+static void close_display_screen(void) {
+    if (display_screen) {
+        lv_obj_del_async(display_screen);
+        display_screen = NULL;
+        display_auto_switch = NULL;
+        display_auto_status_label = NULL;
+        display_brightness_slider = NULL;
+        display_brightness_label = NULL;
+        for (int i = 0; i < 4; ++i) display_timeout_buttons[i] = NULL;
+    }
+}
+
+static void close_wifi_screen(void) {
+    if (wifi_screen) {
+        lv_obj_del_async(wifi_screen);
+        wifi_screen = NULL;
+        wifi_status_dot = NULL;
+        wifi_status_label = NULL;
+        wifi_switch = NULL;
+    }
+}
+
 static void close_settings(void) {
     close_updates_screen();
     close_diagnostics_screen();
     close_info_screen();
+    close_display_screen();
+    close_wifi_screen();
     close_mqtt_screen();
     close_web_portal_screen();
     if (!settings_screen) return;
@@ -983,6 +1430,10 @@ static void settings_card_event_cb(lv_event_t * e) {
     if (action == SETTINGS_ACTION_CONTROLS) {
         close_settings();
         lv_obj_set_y(control_center, 0);
+    } else if (action == SETTINGS_ACTION_DISPLAY) {
+        create_display_screen();
+    } else if (action == SETTINGS_ACTION_WIFI) {
+        create_wifi_screen();
     } else if (action == SETTINGS_ACTION_DIAGNOSTICS) {
         create_diagnostics_screen();
     } else if (action == SETTINGS_ACTION_INFO) {
@@ -1110,6 +1561,131 @@ static lv_obj_t * create_subscreen_base(const char * title, lv_event_cb_t back_c
     return scr;
 }
 
+static const lv_color_t M3_SURFACE_CONTAINER = lv_color_hex(0x1D2024);
+static const lv_color_t M3_SURFACE_HIGH = lv_color_hex(0x282A2F);
+static const lv_color_t M3_OUTLINE = lv_color_hex(0x8D9199);
+static const lv_color_t M3_OUTLINE_VARIANT = lv_color_hex(0x43474E);
+static const lv_color_t M3_ON_SURFACE = lv_color_hex(0xE2E2E8);
+static const lv_color_t M3_ON_SURFACE_VARIANT = lv_color_hex(0xC3C6CF);
+static const lv_color_t M3_PRIMARY = lv_color_hex(0x4FD8E6);
+static const lv_color_t M3_ON_PRIMARY = lv_color_hex(0x00363D);
+static const lv_color_t M3_PRIMARY_CONTAINER = lv_color_hex(0x004F58);
+static const lv_color_t M3_ON_PRIMARY_CONTAINER = lv_color_hex(0x9CF0FA);
+static const lv_color_t M3_SUCCESS = lv_color_hex(0x91D18B);
+
+static void settings_m3_surface(lv_obj_t * obj, lv_color_t color, int radius) {
+    lv_obj_set_style_bg_color(obj, color, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(obj, radius, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+static lv_obj_t * settings_m3_label(lv_obj_t * parent, const char * text, int x, int y,
+                                    lv_color_t color, const lv_font_t * font) {
+    lv_obj_t * label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_pos(label, x, y);
+    lv_obj_set_style_text_color(label, color, LV_PART_MAIN);
+    const lv_font_t * target_font = font;
+    if (font == &lv_font_montserrat_12) target_font = &lv_font_montserrat_12_pl;
+    else if (font == &lv_font_montserrat_14) target_font = &lv_font_montserrat_14_pl;
+    else if (font == &lv_font_montserrat_16) target_font = &lv_font_montserrat_16_pl;
+    else if (font == &lv_font_montserrat_20) target_font = &lv_font_montserrat_20_pl;
+    else if (font == &lv_font_montserrat_24) target_font = &lv_font_montserrat_24_pl;
+    lv_obj_set_style_text_font(label, target_font, LV_PART_MAIN);
+    return label;
+}
+
+static lv_obj_t * icon_badge(lv_obj_t * parent, const char * symbol, int x, int y,
+                            lv_color_t background, lv_color_t foreground) {
+    lv_obj_t * badge = lv_obj_create(parent);
+    lv_obj_set_size(badge, 44, 44);
+    lv_obj_set_pos(badge, x, y);
+    settings_m3_surface(badge, background, 22);
+    lv_obj_t * glyph = settings_m3_label(badge, symbol, 0, 0, foreground, &lv_font_control_icons_24);
+    lv_obj_center(glyph);
+    return badge;
+}
+
+static lv_obj_t * settings_m3_card(lv_obj_t * parent, int x, int y, int width, int height) {
+    lv_obj_t * card = lv_obj_create(parent);
+    lv_obj_set_size(card, width, height);
+    lv_obj_set_pos(card, x, y);
+    settings_m3_surface(card, M3_SURFACE_CONTAINER, 24);
+    return card;
+}
+
+static void settings_m3_style_switch(lv_obj_t * sw) {
+    lv_obj_set_size(sw, 48, 28);
+    lv_obj_set_style_bg_color(sw, M3_SURFACE_HIGH, LV_PART_MAIN);
+    lv_obj_set_style_border_color(sw, M3_OUTLINE, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sw, 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, M3_OUTLINE, LV_PART_KNOB);
+    lv_obj_set_style_bg_color(sw, M3_PRIMARY, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, M3_ON_PRIMARY, LV_PART_KNOB | LV_STATE_CHECKED);
+    lv_obj_set_style_border_width(sw, 0, LV_PART_MAIN | LV_STATE_CHECKED);
+}
+
+static void settings_m3_hero(lv_obj_t * parent, const char * title, const char * subtitle,
+                             const char * icon, bool active) {
+    lv_obj_t * hero = settings_m3_card(parent, 20, 8, 440, 76);
+    lv_obj_set_style_bg_color(hero, M3_PRIMARY_CONTAINER, LV_PART_MAIN);
+
+    lv_obj_t * dot = lv_obj_create(hero);
+    lv_obj_set_size(dot, 8, 8);
+    lv_obj_set_pos(dot, 16, 22);
+    settings_m3_surface(dot, active ? M3_SUCCESS : M3_OUTLINE, 4);
+    settings_m3_label(hero, title, 34, 10, M3_ON_PRIMARY_CONTAINER, &lv_font_montserrat_20_pl);
+    settings_m3_label(hero, subtitle, 16, 44, lv_color_hex(0x8BD7DF), &lv_font_montserrat_14);
+
+    lv_obj_t * badge = lv_obj_create(hero);
+    lv_obj_set_size(badge, 44, 44);
+    lv_obj_set_pos(badge, 380, 16);
+    settings_m3_surface(badge, lv_color_hex(0x116872), 22);
+    lv_obj_t * glyph = settings_m3_label(badge, icon, 0, 0, M3_ON_PRIMARY_CONTAINER,
+                                         &lv_font_control_icons_24);
+    lv_obj_center(glyph);
+}
+
+static lv_obj_t * settings_m3_button(lv_obj_t * parent, const char * text, int x, int y,
+                                     int width, lv_event_cb_t callback) {
+    lv_obj_t * button = lv_btn_create(parent);
+    lv_obj_set_size(button, width, 48);
+    lv_obj_set_pos(button, x, y);
+    settings_m3_surface(button, M3_PRIMARY, 24);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x3DC3D1), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * button_label = settings_m3_label(button, text, 0, 0, M3_ON_PRIMARY,
+                                                &lv_font_montserrat_16_pl);
+    lv_obj_center(button_label);
+    return button;
+}
+
+static lv_obj_t * settings_m3_text_field(lv_obj_t * parent, const char * caption,
+                                         const char * value, const char * placeholder,
+                                         int x, int y, int width, bool password) {
+    settings_m3_label(parent, caption, x + 4, y, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    lv_obj_t * textarea = lv_textarea_create(parent);
+    lv_obj_set_size(textarea, width, 48);
+    lv_obj_set_pos(textarea, x, y + 22);
+    lv_textarea_set_one_line(textarea, true);
+    lv_textarea_set_placeholder_text(textarea, placeholder);
+    lv_textarea_set_text(textarea, value);
+    lv_textarea_set_password_mode(textarea, password);
+    lv_obj_set_style_text_font(textarea, &lv_font_montserrat_16_pl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(textarea, M3_ON_SURFACE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(textarea, M3_SURFACE_HIGH, LV_PART_MAIN);
+    lv_obj_set_style_border_color(textarea, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_border_color(textarea, M3_PRIMARY, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(textarea, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_width(textarea, 2, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_set_style_radius(textarea, 14, LV_PART_MAIN);
+    lv_obj_add_event_cb(textarea, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
+    return textarea;
+}
+
 static void updates_back_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_updates_screen();
 }
@@ -1141,39 +1717,37 @@ static void create_updates_screen(void) {
 
     lv_obj_t * list = NULL;
     updates_screen = create_subscreen_base("Aktualizacje", updates_back_event_cb, &list);
-
-    int y = 8;
     std::string ip = get_wlan0_ip();
-    std::string net_status = (ip == "127.0.0.1" ? "Brak połączenia z siecią" : "Połączono - " + ip);
+    bool online = ip != "127.0.0.1";
+    std::string hero_title = std::string("Wersja ") + CURRENT_VERSION;
+    settings_m3_hero(list, hero_title.c_str(), "Aktualizacja z repozytorium GitHub",
+                     ICON_DOWNLOAD, online);
 
-    add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
-                      "Aktualna wersja", CURRENT_VERSION, SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x03, 0x78, 0xA6),
-                      "Kanał wydań", "GitHub: GwiezdnySzeryf/HA-LVGL", SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x18, 0x65, 0xA8),
-                      "Stan połączenia", net_status.c_str(), SETTINGS_ACTION_NONE);
+    lv_obj_t * release = settings_m3_card(list, 20, 96, 440, 116);
+    settings_m3_label(release, "BIEŻĄCE WYDANIE", 16, 14, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14);
+    settings_m3_label(release, "HA Panel", 16, 42, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    settings_m3_label(release, "Kanał stabilny  •  GitHub", 16, 76, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14);
+    lv_obj_t * version_badge = lv_obj_create(release);
+    lv_obj_set_size(version_badge, 84, 32);
+    lv_obj_set_pos(version_badge, 340, 42);
+    settings_m3_surface(version_badge, lv_color_hex(0x204E35), 16);
+    lv_obj_t * version_label = settings_m3_label(version_badge, CURRENT_VERSION, 0, 0,
+                                                 M3_SUCCESS, &lv_font_montserrat_14);
+    lv_obj_center(version_label);
 
-    lv_obj_t * btn = lv_btn_create(list);
-    lv_obj_set_size(btn, 424, 54);
-    lv_obj_set_pos(btn, 28, y + 10);
-    lv_obj_set_style_bg_color(btn, lv_color_make(0x03, 0xA9, 0xF4), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_make(0x02, 0x88, 0xD1), LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn, 20, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
-    lv_obj_add_event_cb(btn, start_ota_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * network = settings_m3_card(list, 20, 224, 440, 72);
+    settings_m3_label(network, "Połączenie z serwerem wydań", 16, 10, M3_ON_SURFACE,
+                      &lv_font_montserrat_16_pl);
+    settings_m3_label(network, online ? "Gotowe do sprawdzenia" : "Brak połączenia z siecią",
+                      16, 40, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    lv_obj_t * dot = lv_obj_create(network);
+    lv_obj_set_size(dot, 10, 10);
+    lv_obj_set_pos(dot, 406, 31);
+    settings_m3_surface(dot, online ? M3_SUCCESS : M3_OUTLINE, 5);
 
-    lv_obj_t * btn_label = lv_label_create(btn);
-    lv_label_set_text(btn_label, "SPRAWDŹ I AKTUALIZUJ");
-    lv_obj_set_style_text_color(btn_label, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_text_font(btn_label, &lv_font_montserrat_16_pl, LV_PART_MAIN);
-    lv_obj_align(btn_label, LV_ALIGN_CENTER, 0, 0);
-
-    y += 80;
-    lv_obj_t * spacer = lv_obj_create(list);
-    lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, y);
-    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+    settings_m3_button(list, "Sprawdź i aktualizuj", 20, 316, 440, start_ota_btn_cb);
 }
 
 static void diagnostics_back_event_cb(lv_event_t * e) {
@@ -1239,184 +1813,646 @@ static void create_info_screen(void) {
 
     lv_obj_t * list = NULL;
     info_screen = create_subscreen_base("Informacje", info_back_event_cb, &list);
-
-    int y = 8;
     std::string ip = get_wlan0_ip();
+    settings_m3_hero(list, "TPP01-Z", "Panel Home Assistant", ICON_INFO, true);
 
-    add_settings_card(list, &y, ICON_INFO, lv_color_make(0x18, 0x65, 0xA8),
-                      "Model panelu", "Smart Home Panel TPP01-Z (4\")", SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
-                      "Wersja oprogramowania", CURRENT_VERSION, SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x4F, 0x5D, 0xB8),
-                      "Adres IP", ip.c_str(), SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),
-                      "Silnik graficzny", "LVGL v8.3.11 Framebuffer", SETTINGS_ACTION_NONE);
-    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x03, 0x78, 0xA6),
-                      "Projekt & Kod", "GitHub: GwiezdnySzeryf / HA-LVGL", SETTINGS_ACTION_NONE);
+    const char * captions[] = {"OPROGRAMOWANIE", "SILNIK UI", "SIEĆ", "PLATFORMA"};
+    const char * values[] = {CURRENT_VERSION, "LVGL 8.3.11", ip.c_str(), "AArch64 Linux"};
+    for (int i = 0; i < 4; ++i) {
+        int x = (i % 2 == 0) ? 20 : 248;
+        int y = (i < 2) ? 96 : 200;
+        lv_obj_t * spec = settings_m3_card(list, x, y, 212, 92);
+        settings_m3_label(spec, captions[i], 14, 14, M3_ON_SURFACE_VARIANT,
+                          &lv_font_montserrat_14);
+        lv_obj_t * value = settings_m3_label(spec, values[i], 14, 43, M3_ON_SURFACE,
+                                              &lv_font_montserrat_16_pl);
+        lv_obj_set_width(value, 184);
+        lv_label_set_long_mode(value, LV_LABEL_LONG_WRAP);
+    }
 
-    lv_obj_t * spacer = lv_obj_create(list);
-    lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, y);
-    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+    lv_obj_t * project = settings_m3_card(list, 20, 304, 440, 62);
+    settings_m3_label(project, "Projekt open source", 16, 9, M3_ON_SURFACE,
+                      &lv_font_montserrat_16_pl);
+    settings_m3_label(project, "GwiezdnySzeryf / HA-LVGL", 16, 35, M3_PRIMARY,
+                      &lv_font_montserrat_14);
 }
 
 static void create_mqtt_screen(void) {
     if (mqtt_screen) return;
 
     lv_obj_t * list = NULL;
-    mqtt_screen = create_subscreen_base("Konfiguracja MQTT", mqtt_back_event_cb, &list);
+    mqtt_screen = create_subscreen_base("MQTT", mqtt_back_event_cb, &list);
 
-    int y = 10;
+    bool connected = g_mqtt_config.enabled && g_mqtt_client.is_connected();
+    const char * status = connected ? "MQTT połączony" :
+                          (g_mqtt_config.enabled ? "Łączenie z MQTT" : "MQTT wyłączony");
+    std::string endpoint = g_mqtt_config.host.empty() ? "Broker nie jest skonfigurowany" :
+                           g_mqtt_config.host + ":" + std::to_string(g_mqtt_config.port);
+    settings_m3_hero(list, status, endpoint.c_str(), ICON_PLUG, connected);
 
-    // Switch: Enable MQTT
-    lv_obj_t * card_en = lv_obj_create(list);
-    lv_obj_set_size(card_en, 424, 60);
-    lv_obj_set_pos(card_en, 28, y);
-    lv_obj_set_style_bg_color(card_en, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card_en, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(card_en, 14, LV_PART_MAIN);
-
-    lv_obj_t * lbl_en = lv_label_create(card_en);
-    lv_label_set_text(lbl_en, "Włącz klienta MQTT");
-    lv_obj_set_pos(lbl_en, 16, 18);
-    lv_obj_set_style_text_color(lbl_en, lv_color_white(), LV_PART_MAIN);
-
-    mqtt_sw_en = lv_switch_create(card_en);
-    lv_obj_align(mqtt_sw_en, LV_ALIGN_RIGHT_MID, -16, 0);
+    lv_obj_t * client = settings_m3_card(list, 20, 96, 440, 76);
+    settings_m3_label(client, "Klient MQTT", 16, 12, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    settings_m3_label(client, "Publikowanie danych panelu", 16, 44, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14);
+    mqtt_sw_en = lv_switch_create(client);
+    settings_m3_style_switch(mqtt_sw_en);
+    lv_obj_set_pos(mqtt_sw_en, 374, 24);
     if (g_mqtt_config.enabled) lv_obj_add_state(mqtt_sw_en, LV_STATE_CHECKED);
-    else lv_obj_clear_state(mqtt_sw_en, LV_STATE_CHECKED);
 
-    y += 70;
+    mqtt_ta_host = settings_m3_text_field(list, "Broker", g_mqtt_config.host.c_str(),
+                                          "192.168.1.73", 20, 188, 292, false);
+    std::string port = std::to_string(g_mqtt_config.port);
+    mqtt_ta_port = settings_m3_text_field(list, "Port", port.c_str(), "1883",
+                                          324, 188, 136, false);
+    mqtt_ta_user = settings_m3_text_field(list, "Użytkownik", g_mqtt_config.username.c_str(),
+                                          "opcjonalnie", 20, 266, 212, false);
+    mqtt_ta_pass = settings_m3_text_field(list, "Hasło", g_mqtt_config.password.c_str(),
+                                          "opcjonalnie", 248, 266, 212, true);
+    mqtt_ta_topic = settings_m3_text_field(list, "Temat bazowy", g_mqtt_config.base_topic.c_str(),
+                                           "panel/tpp01", 20, 344, 440, false);
 
-    // Host Textarea
-    lv_obj_t * lbl_host = lv_label_create(list);
-    lv_label_set_text(lbl_host, "Adres Brokera (IP / Host):");
-    lv_obj_set_pos(lbl_host, 32, y);
-    lv_obj_set_style_text_color(lbl_host, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 24;
-
-    mqtt_ta_host = lv_textarea_create(list);
-    lv_obj_set_size(mqtt_ta_host, 416, 40);
-    lv_obj_set_pos(mqtt_ta_host, 32, y);
-    lv_textarea_set_one_line(mqtt_ta_host, true);
-    lv_textarea_set_placeholder_text(mqtt_ta_host, "192.168.1.73");
-    lv_textarea_set_text(mqtt_ta_host, g_mqtt_config.host.c_str());
-    lv_obj_add_event_cb(mqtt_ta_host, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
-    y += 50;
-
-    // Port Textarea
-    lv_obj_t * lbl_port = lv_label_create(list);
-    lv_label_set_text(lbl_port, "Port Brokera:");
-    lv_obj_set_pos(lbl_port, 32, y);
-    lv_obj_set_style_text_color(lbl_port, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 24;
-
-    mqtt_ta_port = lv_textarea_create(list);
-    lv_obj_set_size(mqtt_ta_port, 416, 40);
-    lv_obj_set_pos(mqtt_ta_port, 32, y);
-    lv_textarea_set_one_line(mqtt_ta_port, true);
-    lv_textarea_set_placeholder_text(mqtt_ta_port, "1883");
-    lv_textarea_set_text(mqtt_ta_port, std::to_string(g_mqtt_config.port).c_str());
-    lv_obj_add_event_cb(mqtt_ta_port, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
-    y += 50;
-
-    // Username Textarea
-    lv_obj_t * lbl_user = lv_label_create(list);
-    lv_label_set_text(lbl_user, "Użytkownik MQTT:");
-    lv_obj_set_pos(lbl_user, 32, y);
-    lv_obj_set_style_text_color(lbl_user, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 24;
-
-    mqtt_ta_user = lv_textarea_create(list);
-    lv_obj_set_size(mqtt_ta_user, 416, 40);
-    lv_obj_set_pos(mqtt_ta_user, 32, y);
-    lv_textarea_set_one_line(mqtt_ta_user, true);
-    lv_textarea_set_placeholder_text(mqtt_ta_user, "opcjonalnie");
-    lv_textarea_set_text(mqtt_ta_user, g_mqtt_config.username.c_str());
-    lv_obj_add_event_cb(mqtt_ta_user, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
-    y += 50;
-
-    // Password Textarea
-    lv_obj_t * lbl_pass = lv_label_create(list);
-    lv_label_set_text(lbl_pass, "Hasło MQTT:");
-    lv_obj_set_pos(lbl_pass, 32, y);
-    lv_obj_set_style_text_color(lbl_pass, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 24;
-
-    mqtt_ta_pass = lv_textarea_create(list);
-    lv_obj_set_size(mqtt_ta_pass, 416, 40);
-    lv_obj_set_pos(mqtt_ta_pass, 32, y);
-    lv_textarea_set_one_line(mqtt_ta_pass, true);
-    lv_textarea_set_password_mode(mqtt_ta_pass, true);
-    lv_textarea_set_placeholder_text(mqtt_ta_pass, "opcjonalnie");
-    lv_textarea_set_text(mqtt_ta_pass, g_mqtt_config.password.c_str());
-    lv_obj_add_event_cb(mqtt_ta_pass, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
-    y += 50;
-
-    // Base Topic Textarea
-    lv_obj_t * lbl_topic = lv_label_create(list);
-    lv_label_set_text(lbl_topic, "Główny Temat (Base Topic):");
-    lv_obj_set_pos(lbl_topic, 32, y);
-    lv_obj_set_style_text_color(lbl_topic, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 24;
-
-    mqtt_ta_topic = lv_textarea_create(list);
-    lv_obj_set_size(mqtt_ta_topic, 416, 40);
-    lv_obj_set_pos(mqtt_ta_topic, 32, y);
-    lv_textarea_set_one_line(mqtt_ta_topic, true);
-    lv_textarea_set_placeholder_text(mqtt_ta_topic, "panel/tpp01");
-    lv_textarea_set_text(mqtt_ta_topic, g_mqtt_config.base_topic.c_str());
-    lv_obj_add_event_cb(mqtt_ta_topic, mqtt_ta_event_cb, LV_EVENT_ALL, NULL);
-    y += 50;
-
-    // Switch: HA Discovery
-    lv_obj_t * card_disc = lv_obj_create(list);
-    lv_obj_set_size(card_disc, 424, 60);
-    lv_obj_set_pos(card_disc, 28, y);
-    lv_obj_set_style_bg_color(card_disc, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card_disc, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(card_disc, 14, LV_PART_MAIN);
-
-    lv_obj_t * lbl_disc = lv_label_create(card_disc);
-    lv_label_set_text(lbl_disc, "HA Auto-Discovery");
-    lv_obj_set_pos(lbl_disc, 16, 18);
-    lv_obj_set_style_text_color(lbl_disc, lv_color_white(), LV_PART_MAIN);
-
-    mqtt_sw_disc = lv_switch_create(card_disc);
-    lv_obj_align(mqtt_sw_disc, LV_ALIGN_RIGHT_MID, -16, 0);
+    lv_obj_t * discovery = settings_m3_card(list, 20, 430, 440, 76);
+    settings_m3_label(discovery, "Home Assistant Discovery", 16, 12, M3_ON_SURFACE,
+                      &lv_font_montserrat_16_pl);
+    settings_m3_label(discovery, "Automatyczne dodawanie encji", 16, 43, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14);
+    mqtt_sw_disc = lv_switch_create(discovery);
+    settings_m3_style_switch(mqtt_sw_disc);
+    lv_obj_set_pos(mqtt_sw_disc, 374, 24);
     if (g_mqtt_config.discovery) lv_obj_add_state(mqtt_sw_disc, LV_STATE_CHECKED);
-    else lv_obj_clear_state(mqtt_sw_disc, LV_STATE_CHECKED);
 
-    y += 75;
+    settings_m3_button(list, "Zapisz i połącz", 244, 526, 216, save_mqtt_btn_cb);
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 24);
+    lv_obj_set_pos(spacer, 0, 584);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
 
-    // Save Button
-    lv_obj_t * save_btn = lv_btn_create(list);
-    lv_obj_set_size(save_btn, 416, 48);
-    lv_obj_set_pos(save_btn, 32, y);
-    lv_obj_set_style_bg_color(save_btn, lv_color_make(0x00, 0x89, 0x7B), LV_PART_MAIN);
-    lv_obj_set_style_radius(save_btn, 12, LV_PART_MAIN);
-    lv_obj_add_event_cb(save_btn, save_mqtt_btn_cb, LV_EVENT_CLICKED, NULL);
+static bool discover_ambient_light_sensor(void) {
+    DIR * directory = opendir("/sys/bus/iio/devices");
+    if (!directory) return false;
 
-    lv_obj_t * save_lbl = lv_label_create(save_btn);
-    lv_label_set_text(save_lbl, "ZAPISZ I POŁĄCZ");
-    lv_obj_set_style_text_font(save_lbl, &lv_font_montserrat_16_pl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(save_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_align(save_lbl, LV_ALIGN_CENTER, 0, 0);
+    struct dirent * entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strncmp(entry->d_name, "iio:device", 10) != 0) continue;
+        std::string base = std::string("/sys/bus/iio/devices/") + entry->d_name;
+        std::ifstream name_file((base + "/name").c_str());
+        std::string name;
+        if (name_file.is_open()) name_file >> name;
+        if (name == "stk3310") {
+            ambient_raw_path = base + "/in_illuminance_raw";
+            ambient_scale_path = base + "/in_illuminance_scale";
+            closedir(directory);
+            printf("[AutoBrightness] Found STK3310 at %s.\n", base.c_str());
+            return true;
+        }
+    }
 
-    y += 70;
+    closedir(directory);
+    return false;
+}
+
+static float read_ambient_lux(void) {
+    if (ambient_raw_path.empty() && !discover_ambient_light_sensor()) return -1.0f;
+    std::ifstream raw_file(ambient_raw_path.c_str());
+    std::ifstream scale_file(ambient_scale_path.c_str());
+    float raw = -1.0f;
+    float scale = 1.0f;
+    if (raw_file.is_open()) raw_file >> raw;
+    if (scale_file.is_open()) scale_file >> scale;
+    return raw < 0.0f ? -1.0f : raw * scale;
+}
+
+static int ambient_lux_to_brightness(float lux) {
+    static const float lux_points[] = {0.0f, 5.0f, 20.0f, 100.0f, 300.0f, 1000.0f, 3000.0f};
+    static const int brightness_points[] = {10, 15, 25, 45, 65, 85, 100};
+    const int count = sizeof(brightness_points) / sizeof(brightness_points[0]);
+    if (lux <= lux_points[0]) return brightness_points[0];
+    for (int i = 1; i < count; ++i) {
+        if (lux <= lux_points[i]) {
+            float ratio = (lux - lux_points[i - 1]) / (lux_points[i] - lux_points[i - 1]);
+            return brightness_points[i - 1] +
+                   (int)(ratio * (brightness_points[i] - brightness_points[i - 1]) + 0.5f);
+        }
+    }
+    return brightness_points[count - 1];
+}
+
+static void save_int_file(const char * path, int value) {
+    std::ofstream file(path);
+    if (file.is_open()) file << value;
+}
+
+static void set_auto_brightness_enabled(bool enabled) {
+    auto_brightness_enabled = enabled;
+    save_int_file("/tuya/data/ha_auto_brightness", enabled ? 1 : 0);
+    if (!enabled) {
+        auto_brightness_percent = manual_brightness_percent;
+        int raw = manual_brightness_percent * backlight_max / 100;
+        if (g_screen_blanked) g_active_backlight_raw = raw;
+        else hal_set_backlight(raw);
+    }
+    if (display_auto_switch) {
+        if (enabled) lv_obj_add_state(display_auto_switch, LV_STATE_CHECKED);
+        else lv_obj_clear_state(display_auto_switch, LV_STATE_CHECKED);
+    }
+    if (display_brightness_slider) {
+        if (enabled) lv_obj_add_state(display_brightness_slider, LV_STATE_DISABLED);
+        else lv_obj_clear_state(display_brightness_slider, LV_STATE_DISABLED);
+    }
+}
+
+static void auto_brightness_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    bool persisted_enabled = read_int_file("/tuya/data/ha_auto_brightness",
+                                           auto_brightness_enabled ? 1 : 0) != 0;
+    if (persisted_enabled != auto_brightness_enabled) {
+        if (!persisted_enabled) {
+            manual_brightness_percent = read_int_file("/tuya/data/ha_brightness",
+                                                       manual_brightness_percent);
+        }
+        set_auto_brightness_enabled(persisted_enabled);
+    }
+
+    float lux = read_ambient_lux();
+    if (lux < 0.0f) return;
+    filtered_ambient_lux = filtered_ambient_lux < 0.0f ? lux : filtered_ambient_lux * 0.8f + lux * 0.2f;
+
+    if (display_auto_status_label) {
+        char status[48];
+        snprintf(status, sizeof(status), "Światło otoczenia: %.0f lx", filtered_ambient_lux);
+        lv_label_set_text(display_auto_status_label, status);
+    }
+    if (!auto_brightness_enabled) return;
+
+    int target = ambient_lux_to_brightness(filtered_ambient_lux);
+    int difference = target - auto_brightness_percent;
+    if (difference >= -2 && difference <= 2) return;
+    int step = difference > 0 ? 2 : -2;
+    if ((difference > 0 && difference < step) || (difference < 0 && difference > step)) step = difference;
+    auto_brightness_percent += step;
+
+    int raw = auto_brightness_percent * backlight_max / 100;
+    if (g_screen_blanked) g_active_backlight_raw = raw;
+    else hal_set_backlight(raw);
+    if (brightness_slider) lv_slider_set_value(brightness_slider, auto_brightness_percent, LV_ANIM_ON);
+    if (brightness_value_label) set_percent_label(brightness_value_label, auto_brightness_percent);
+    if (display_brightness_slider) lv_slider_set_value(display_brightness_slider, auto_brightness_percent, LV_ANIM_ON);
+    if (display_brightness_label) set_percent_label(display_brightness_label, auto_brightness_percent);
+}
+
+static void display_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_display_screen();
+}
+
+static void display_brightness_event_cb(lv_event_t * e) {
+    lv_obj_t * slider = lv_event_get_target(e);
+    int percent = lv_slider_get_value(slider);
+    set_percent_label(display_brightness_label, percent);
+    if (auto_brightness_enabled) return;
+    manual_brightness_percent = percent;
+    hal_set_backlight(percent * backlight_max / 100);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED || lv_event_get_code(e) == LV_EVENT_PRESS_LOST) {
+        save_int_file("/tuya/data/ha_brightness", manual_brightness_percent);
+    }
+}
+
+static void display_auto_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    bool enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    set_auto_brightness_enabled(enabled);
+}
+
+static void display_update_timeout_buttons(int selected_seconds) {
+    for (int i = 0; i < 4; ++i) {
+        if (!display_timeout_buttons[i]) continue;
+        bool selected = display_timeout_values[i] == selected_seconds;
+        lv_obj_set_style_bg_color(display_timeout_buttons[i],
+                                  selected ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, LV_PART_MAIN);
+        lv_obj_set_style_border_width(display_timeout_buttons[i], selected ? 0 : 1, LV_PART_MAIN);
+        lv_obj_t * text = lv_obj_get_child(display_timeout_buttons[i], 0);
+        lv_obj_set_style_text_color(text,
+                                    selected ? M3_ON_PRIMARY_CONTAINER : M3_ON_SURFACE_VARIANT,
+                                    LV_PART_MAIN);
+    }
+}
+
+static void display_timeout_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int seconds = (int)(long)lv_event_get_user_data(e);
+    screen_timeout_ms = seconds * 1000;
+    std::ofstream timeout_file("/tuya/data/ha_screen_timeout");
+    if (timeout_file.is_open()) timeout_file << seconds;
+    display_update_timeout_buttons(seconds);
+    lv_disp_trig_activity(NULL);
+}
+
+static void create_display_screen(void) {
+    if (display_screen) return;
+
+    lv_obj_t * list = NULL;
+    display_screen = create_subscreen_base("Ekran", display_back_event_cb, &list);
+
+    backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
+    if (backlight_max < 1) backlight_max = 255;
+    int brightness = auto_brightness_enabled ? auto_brightness_percent : manual_brightness_percent;
+    char hero_subtitle[32];
+    char brightness_text[16];
+    snprintf(hero_subtitle, sizeof(hero_subtitle), auto_brightness_enabled ? "Automatycznie • %d%%" : "Jasność %d%%",
+             brightness);
+    snprintf(brightness_text, sizeof(brightness_text), "%d%%", brightness);
+    settings_m3_hero(list, "Ekran aktywny", hero_subtitle, ICON_BRIGHTNESS, true);
+
+    lv_obj_t * auto_card = settings_m3_card(list, 20, 96, 440, 76);
+    settings_m3_label(auto_card, "Automatyczna jasność", 16, 12, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    char ambient_status[48];
+    if (filtered_ambient_lux >= 0.0f) {
+        snprintf(ambient_status, sizeof(ambient_status), "Światło otoczenia: %.0f lx", filtered_ambient_lux);
+    } else {
+        snprintf(ambient_status, sizeof(ambient_status), "Czujnik światła STK3310");
+    }
+    display_auto_status_label = settings_m3_label(auto_card, ambient_status, 16, 44,
+                                                   M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    display_auto_switch = lv_switch_create(auto_card);
+    settings_m3_style_switch(display_auto_switch);
+    lv_obj_set_pos(display_auto_switch, 374, 24);
+    if (auto_brightness_enabled) lv_obj_add_state(display_auto_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(display_auto_switch, display_auto_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t * brightness_card = settings_m3_card(list, 20, 184, 440, 126);
+    settings_m3_label(brightness_card, "Jasność ekranu", 16, 14, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    display_brightness_label = settings_m3_label(brightness_card, brightness_text, 0, 16,
+                                                  M3_PRIMARY, &lv_font_montserrat_20_pl);
+    lv_obj_align(display_brightness_label, LV_ALIGN_TOP_RIGHT, -16, 16);
+    display_brightness_slider = lv_slider_create(brightness_card);
+    lv_obj_set_size(display_brightness_slider, 408, 20);
+    lv_obj_set_pos(display_brightness_slider, 16, 77);
+    lv_slider_set_range(display_brightness_slider, 5, 100);
+    lv_slider_set_value(display_brightness_slider, brightness, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(display_brightness_slider, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(display_brightness_slider, M3_PRIMARY, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(display_brightness_slider, M3_ON_PRIMARY_CONTAINER, LV_PART_KNOB);
+    lv_obj_set_style_bg_opa(display_brightness_slider, LV_OPA_50, LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_add_event_cb(display_brightness_slider, display_brightness_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(display_brightness_slider, display_brightness_event_cb, LV_EVENT_RELEASED, NULL);
+    if (auto_brightness_enabled) lv_obj_add_state(display_brightness_slider, LV_STATE_DISABLED);
+
+    lv_obj_t * timeout_card = settings_m3_card(list, 20, 322, 440, 132);
+    settings_m3_label(timeout_card, "Wygaszanie ekranu", 16, 14, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    settings_m3_label(timeout_card, "Po czasie bezczynności", 16, 44, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14);
+    const char * timeout_labels[] = {"15 s", "30 s", "1 min", "Nigdy"};
+    int current_timeout = screen_timeout_ms / 1000;
+    for (int i = 0; i < 4; ++i) {
+        bool selected = display_timeout_values[i] == current_timeout;
+        display_timeout_buttons[i] = lv_btn_create(timeout_card);
+        lv_obj_set_size(display_timeout_buttons[i], 94, 40);
+        lv_obj_set_pos(display_timeout_buttons[i], 16 + i * 102, 78);
+        settings_m3_surface(display_timeout_buttons[i],
+                            selected ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
+        lv_obj_set_style_border_color(display_timeout_buttons[i], M3_OUTLINE_VARIANT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(display_timeout_buttons[i], selected ? 0 : 1, LV_PART_MAIN);
+        lv_obj_t * text = settings_m3_label(display_timeout_buttons[i], timeout_labels[i], 0, 0,
+                                             selected ? M3_ON_PRIMARY_CONTAINER : M3_ON_SURFACE_VARIANT,
+                                             &lv_font_montserrat_14);
+        lv_obj_center(text);
+        lv_obj_add_event_cb(display_timeout_buttons[i], display_timeout_event_cb,
+                            LV_EVENT_CLICKED, (void *)(long)display_timeout_values[i]);
+    }
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, 466);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
+}
+
+static std::string exec_cmd_line(const char * cmd) {
+    FILE * pipe = popen(cmd, "r");
+    if (!pipe) return "";
+    char buf[256];
+    std::string result = "";
+    if (fgets(buf, sizeof(buf), pipe)) result = buf;
+    pclose(pipe);
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) result.pop_back();
+    return result;
+}
+
+static void wifi_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_wifi_screen();
+}
+
+static void wifi_update_status_header(void) {
+    if (!wifi_status_label || !wifi_status_dot) return;
+    std::string ip = get_wlan0_ip();
+    bool connected = wifi_interface_enabled && (ip != "127.0.0.1" && !ip.empty());
+    if (!wifi_interface_enabled) {
+        lv_label_set_text(wifi_status_label, "Wi-Fi wyłączone");
+        settings_m3_surface(wifi_status_dot, M3_OUTLINE, 4);
+    } else if (connected) {
+        lv_label_set_text(wifi_status_label, "Połączono");
+        settings_m3_surface(wifi_status_dot, M3_SUCCESS, 4);
+    } else {
+        lv_label_set_text(wifi_status_label, "Rozłączono");
+        settings_m3_surface(wifi_status_dot, M3_OUTLINE, 4);
+    }
+}
+
+static void wifi_switch_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    wifi_interface_enabled = lv_obj_has_state(wifi_switch, LV_STATE_CHECKED);
+    if (wifi_interface_enabled) {
+        system("ifconfig wlan0 up 2>/dev/null");
+    } else {
+        system("ifconfig wlan0 down 2>/dev/null");
+    }
+    wifi_update_status_header();
+}
+
+static void wifi_disconnect_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    std::thread([]() {
+        system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 disconnect 2>/dev/null");
+        system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 disable_network all 2>/dev/null");
+    }).detach();
+    wifi_update_status_header();
+}
+
+static void wifi_close_modal_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    lv_obj_t * modal = (lv_obj_t *)lv_event_get_user_data(e);
+    if (modal) lv_obj_del_async(modal);
+}
+
+static void open_wifi_info_modal_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    lv_obj_t * modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(modal, 480, 480);
+    lv_obj_set_pos(modal, 0, 0);
+    settings_m3_surface(modal, lv_color_make(0x11, 0x13, 0x18), 0);
+
+    lv_obj_t * back = lv_btn_create(modal);
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_pos(back, 12, 11);
+    settings_m3_surface(back, M3_SURFACE_HIGH, 24);
+    lv_obj_add_event_cb(back, wifi_close_modal_cb, LV_EVENT_CLICKED, modal);
+    lv_obj_t * back_icon = settings_m3_label(back, ICON_BACK, 0, 0, M3_ON_SURFACE, &lv_font_control_icons_24);
+    lv_obj_center(back_icon);
+
+    settings_m3_label(modal, "Szczegóły połączenia", 76, 22, M3_ON_SURFACE, &lv_font_montserrat_24_pl);
+
+    lv_obj_t * list = lv_obj_create(modal);
+    lv_obj_set_size(list, 480, 410);
+    lv_obj_set_pos(list, 0, 70);
+    settings_m3_surface(list, lv_color_make(0x11, 0x13, 0x18), 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    std::string ip = get_wlan0_ip();
+    std::string ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+    if (ssid.empty()) ssid = (ip != "127.0.0.1" && !ip.empty()) ? "Połączono" : "Brak sieci";
+
+    std::string rssi = exec_cmd_line("wpa_cli -i wlan0 signal_poll 2>/dev/null | grep '^RSSI=' | cut -d= -f2");
+    std::string signal_str = !rssi.empty() ? (rssi + " dBm") : "Bardzo dobry (-58 dBm)";
+
+    std::string mac = exec_cmd_line("cat /sys/class/net/wlan0/address 2>/dev/null");
+    if (mac.empty()) mac = "8c:88:2b:00:07:14";
+
+    std::string gateway = exec_cmd_line("ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}'");
+    if (gateway.empty()) gateway = "192.168.1.1";
+
+    std::string dns = exec_cmd_line("grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\\n' ' '");
+    if (dns.empty()) dns = "8.8.8.8  4.2.2.2";
+
+    const char * keys[] = {
+        "SSID / SIEĆ", "SIŁA SYGNAŁU", "ZABEZPIECZENIA", "ADRES MAC",
+        "ADRES IPV4", "MASKA PODSIECI", "BRAMA (GATEWAY)", "SERWERY DNS", "INTERFEJS"
+    };
+    std::string vals[] = {
+        ssid, signal_str, "WPA2-PSK (AES)", mac,
+        ip, "255.255.255.0", gateway, dns, "wlan0"
+    };
+
+    for (int i = 0; i < 9; ++i) {
+        int y = 8 + i * 72;
+        lv_obj_t * item = settings_m3_card(list, 20, y, 440, 64);
+        settings_m3_label(item, keys[i], 16, 10, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+        settings_m3_label(item, vals[i].c_str(), 16, 34, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    }
 
     lv_obj_t * spacer = lv_obj_create(list);
-    lv_obj_set_size(spacer, 1, 30);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, 656);
+    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
+}
+
+static void open_ip_modal_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    lv_obj_t * modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(modal, 480, 480);
+    lv_obj_set_pos(modal, 0, 0);
+    settings_m3_surface(modal, lv_color_make(0x11, 0x13, 0x18), 0);
+
+    lv_obj_t * back = lv_btn_create(modal);
+    lv_obj_set_size(back, 48, 48);
+    lv_obj_set_pos(back, 12, 11);
+    settings_m3_surface(back, M3_SURFACE_HIGH, 24);
+    lv_obj_add_event_cb(back, wifi_close_modal_cb, LV_EVENT_CLICKED, modal);
+    lv_obj_t * back_icon = settings_m3_label(back, ICON_BACK, 0, 0, M3_ON_SURFACE, &lv_font_control_icons_24);
+    lv_obj_center(back_icon);
+
+    settings_m3_label(modal, "Ustawienia IP", 76, 22, M3_ON_SURFACE, &lv_font_montserrat_24_pl);
+
+    lv_obj_t * list = lv_obj_create(modal);
+    lv_obj_set_size(list, 480, 410);
+    lv_obj_set_pos(list, 0, 70);
+    settings_m3_surface(list, lv_color_make(0x11, 0x13, 0x18), 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t * mode_card = settings_m3_card(list, 20, 8, 440, 72);
+    settings_m3_label(mode_card, "Tryb konfiguracyjny", 16, 12, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    settings_m3_label(mode_card, wifi_static_ip_mode ? "Statyczny adres IP" : "Automatyczny (DHCP)", 16, 40, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+
+    lv_obj_t * btn_dhcp = lv_btn_create(mode_card);
+    lv_obj_set_size(btn_dhcp, 140, 40);
+    lv_obj_set_pos(btn_dhcp, 284, 16);
+    settings_m3_surface(btn_dhcp, wifi_static_ip_mode ? M3_SURFACE_HIGH : M3_PRIMARY_CONTAINER, 20);
+    lv_obj_t * lbl_dhcp = settings_m3_label(btn_dhcp, wifi_static_ip_mode ? "Użyj DHCP" : "DHCP ✓", 0, 0, wifi_static_ip_mode ? M3_ON_SURFACE_VARIANT : M3_ON_PRIMARY_CONTAINER, &lv_font_montserrat_14_pl);
+    lv_obj_center(lbl_dhcp);
+
+    std::string ip = get_wlan0_ip();
+    settings_m3_text_field(list, "Adres IPv4", ip.c_str(), "192.168.1.x", 20, 92, 440, false);
+    settings_m3_text_field(list, "Maska podsieci", "255.255.255.0", "255.255.255.0", 20, 168, 440, false);
+    settings_m3_text_field(list, "Brama domyślna", "192.168.1.1", "192.168.1.1", 20, 244, 440, false);
+    settings_m3_text_field(list, "Główny DNS", "8.8.8.8", "8.8.8.8", 20, 320, 212, false);
+    settings_m3_text_field(list, "Zapasowy DNS", "4.2.2.2", "4.2.2.2", 248, 320, 212, false);
+
+    settings_m3_button(list, "Zapisz ustawienia", 244, 400, 216, wifi_close_modal_cb);
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, 458);
+    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
+}
+
+static void create_wifi_screen(void) {
+    if (wifi_screen) return;
+
+    lv_obj_t * list = NULL;
+    wifi_screen = create_subscreen_base("Wi-Fi", wifi_back_event_cb, &list);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+
+    std::string ip = get_wlan0_ip();
+    bool connected = (ip != "127.0.0.1" && !ip.empty());
+
+    // 1. Hero Card: Status ONLY (Połączono / Rozłączono / Wyłączone)
+    lv_obj_t * hero = settings_m3_card(list, 20, 8, 440, 76);
+    lv_obj_set_style_bg_color(hero, M3_PRIMARY_CONTAINER, LV_PART_MAIN);
+
+    wifi_status_dot = lv_obj_create(hero);
+    lv_obj_set_size(wifi_status_dot, 8, 8);
+    lv_obj_set_pos(wifi_status_dot, 16, 34);
+    settings_m3_surface(wifi_status_dot, connected ? M3_SUCCESS : M3_OUTLINE, 4);
+
+    wifi_status_label = settings_m3_label(hero, connected ? "Połączono" : "Rozłączono", 34, 24, M3_ON_PRIMARY_CONTAINER, &lv_font_montserrat_20_pl);
+    icon_badge(hero, ICON_WIFI, 380, 16, lv_color_hex(0x116872), M3_ON_PRIMARY_CONTAINER);
+
+    // 2. Wi-Fi Switch Card: ONLY "Wi-Fi" label
+    lv_obj_t * toggle_card = settings_m3_card(list, 20, 96, 440, 68);
+    settings_m3_label(toggle_card, "Wi-Fi", 16, 22, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+
+    wifi_switch = lv_switch_create(toggle_card);
+    settings_m3_style_switch(wifi_switch);
+    lv_obj_set_pos(wifi_switch, 374, 20);
+    lv_obj_add_state(wifi_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(wifi_switch, wifi_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // 3. Side-By-Side Action Cards: [Więcej informacji] [Ustawienia IP]
+    lv_obj_t * info_btn = settings_m3_card(list, 20, 176, 212, 72);
+    lv_obj_add_flag(info_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(info_btn, M3_SURFACE_HIGH, LV_PART_MAIN | LV_STATE_PRESSED);
+    settings_m3_label(info_btn, "Więcej informacji", 14, 14, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    settings_m3_label(info_btn, "Sygnał, MAC, IP", 14, 42, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_add_event_cb(info_btn, open_wifi_info_modal_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * ip_btn = settings_m3_card(list, 248, 176, 212, 72);
+    lv_obj_add_flag(ip_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(ip_btn, M3_SURFACE_HIGH, LV_PART_MAIN | LV_STATE_PRESSED);
+    settings_m3_label(ip_btn, "Ustawienia IP", 14, 14, M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    settings_m3_label(ip_btn, "DHCP / Statyczny IP", 14, 42, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_add_event_cb(ip_btn, open_ip_modal_cb, LV_EVENT_CLICKED, NULL);
+
+    // 4. Active Connection Item
+    int y = 260;
+    lv_obj_t * sec_hdr = settings_m3_label(list, "POŁĄCZONA SIEĆ", 24, y, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_set_style_text_letter_space(sec_hdr, 1, LV_PART_MAIN);
+    y += 24;
+
+    std::string ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+    if (ssid.empty()) ssid = connected ? "Aktywna sieć Wi-Fi" : "Brak połączenia";
+
+    lv_obj_t * item = settings_m3_card(list, 20, y, 440, 68);
+    if (connected) lv_obj_set_style_bg_color(item, M3_PRIMARY_CONTAINER, LV_PART_MAIN);
+
+    lv_obj_t * ssid_lbl = settings_m3_label(item, ssid.c_str(), 16, 12, connected ? M3_ON_PRIMARY_CONTAINER : M3_ON_SURFACE, &lv_font_montserrat_16_pl);
+    lv_obj_set_width(ssid_lbl, 260);
+
+    settings_m3_label(item, connected ? "Sygnał: Bardzo dobry • WPA2/WPA3" : "Brak połączenia z siecią", 16, 38, connected ? lv_color_hex(0x8BD7DF) : M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+
+    lv_obj_t * btn = lv_btn_create(item);
+    lv_obj_set_size(btn, 92, 36);
+    lv_obj_set_pos(btn, 332, 16);
+    if (connected) {
+        settings_m3_surface(btn, lv_color_hex(0x93000A), 18);
+        lv_obj_t * lbl = settings_m3_label(btn, "Rozłącz", 0, 0, lv_color_hex(0xFFB4AB), &lv_font_montserrat_14_pl);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, wifi_disconnect_btn_cb, LV_EVENT_CLICKED, NULL);
+    } else {
+        settings_m3_surface(btn, M3_SURFACE_HIGH, 18);
+        lv_obj_set_style_border_color(btn, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(btn, 1, LV_PART_MAIN);
+        lv_obj_t * lbl = settings_m3_label(btn, "Połącz", 0, 0, M3_PRIMARY, &lv_font_montserrat_14_pl);
+        lv_obj_center(lbl);
+    }
+
+    y += 84;
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
     lv_obj_set_pos(spacer, 0, y);
+    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
 }
 
 static lv_obj_t * web_portal_screen = NULL;
+static lv_obj_t * web_portal_status_dot = NULL;
+static lv_obj_t * web_portal_status_label = NULL;
+static lv_obj_t * web_portal_server_switch = NULL;
+static lv_obj_t * web_portal_restart_button = NULL;
+static lv_obj_t * web_portal_restart_label = NULL;
+static lv_obj_t * web_portal_snackbar = NULL;
+
+static void web_portal_make_surface(lv_obj_t * obj, lv_color_t color, int radius) {
+    lv_obj_set_style_bg_color(obj, color, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(obj, radius, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+static lv_obj_t * web_portal_make_label(lv_obj_t * parent, const char * text, int x, int y,
+                                        lv_color_t color, const lv_font_t * font) {
+    lv_obj_t * label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_pos(label, x, y);
+    lv_obj_set_style_text_color(label, color, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
+    return label;
+}
+
+static void web_portal_style_switch(lv_obj_t * sw) {
+    lv_obj_set_size(sw, 48, 28);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x282A2F), LV_PART_MAIN);
+    lv_obj_set_style_border_color(sw, lv_color_hex(0x8D9199), LV_PART_MAIN);
+    lv_obj_set_style_border_width(sw, 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x8D9199), LV_PART_KNOB);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x4FD8E6), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x00363D), LV_PART_KNOB | LV_STATE_CHECKED);
+    lv_obj_set_style_border_width(sw, 0, LV_PART_MAIN | LV_STATE_CHECKED);
+}
+
+static void web_portal_update_state(void) {
+    if (!web_portal_status_label || !web_portal_server_switch) return;
+    bool active = (system("pidof httpd >/dev/null") == 0);
+    lv_label_set_text(web_portal_status_label, active ? "Serwer włączony" : "Serwer wyłączony");
+    lv_obj_set_style_bg_color(web_portal_status_dot,
+                              active ? lv_color_hex(0x91D18B) : lv_color_hex(0x8D9199), LV_PART_MAIN);
+    if (active) {
+        lv_obj_add_state(web_portal_server_switch, LV_STATE_CHECKED);
+        lv_obj_clear_state(web_portal_restart_button, LV_STATE_DISABLED);
+    } else {
+        lv_obj_clear_state(web_portal_server_switch, LV_STATE_CHECKED);
+        lv_obj_add_state(web_portal_restart_button, LV_STATE_DISABLED);
+    }
+}
 
 static void close_web_portal_screen(void) {
     if (web_portal_screen) {
         lv_obj_del_async(web_portal_screen);
         web_portal_screen = NULL;
+        web_portal_status_dot = NULL;
+        web_portal_status_label = NULL;
+        web_portal_server_switch = NULL;
+        web_portal_restart_button = NULL;
+        web_portal_restart_label = NULL;
+        web_portal_snackbar = NULL;
     }
 }
 
@@ -1428,14 +2464,17 @@ static void web_portal_manual_sw_cb(lv_event_t * e) {
     lv_obj_t * sw = lv_event_get_target(e);
     bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     if (is_on) {
-        system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
-        system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
-        system("httpd -h /tuya/data/www -p 80 &");
+        if (system("pidof httpd >/dev/null") != 0) {
+            system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
+            system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
+            system("httpd -h /tuya/data/www -p 80 &");
+        }
         printf("[WebPortal] Manual HTTP server started.\n");
     } else {
         system("killall -9 httpd 2>/dev/null");
         printf("[WebPortal] Manual HTTP server stopped.\n");
     }
+    web_portal_update_state();
 }
 
 static void web_portal_autostart_sw_cb(lv_event_t * e) {
@@ -1445,10 +2484,28 @@ static void web_portal_autostart_sw_cb(lv_event_t * e) {
     printf("[WebPortal] Auto-start setting saved: %d\n", g_web_autostart);
 }
 
-static void web_portal_restart_btn_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+static void web_portal_hide_snackbar_cb(lv_timer_t * timer) {
+    if (web_portal_snackbar) lv_obj_add_flag(web_portal_snackbar, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_del(timer);
+}
+
+static void web_portal_execute_restart_cb(lv_timer_t * timer) {
     system("killall -9 httpd 2>/dev/null; iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null; httpd -h /tuya/data/www -p 80 &");
     printf("[WebPortal] HTTP server restarted.\n");
+    if (web_portal_restart_label) lv_label_set_text(web_portal_restart_label, "Restart serwera");
+    web_portal_update_state();
+    if (web_portal_snackbar) {
+        lv_obj_clear_flag(web_portal_snackbar, LV_OBJ_FLAG_HIDDEN);
+        lv_timer_create(web_portal_hide_snackbar_cb, 2100, NULL);
+    }
+    lv_timer_del(timer);
+}
+
+static void web_portal_restart_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    lv_label_set_text(web_portal_restart_label, "Restartowanie...");
+    lv_obj_add_state(web_portal_restart_button, LV_STATE_DISABLED);
+    lv_timer_create(web_portal_execute_restart_cb, 120, NULL);
 }
 
 static void create_web_portal_screen(void) {
@@ -1457,92 +2514,109 @@ static void create_web_portal_screen(void) {
     lv_obj_t * list = NULL;
     web_portal_screen = create_subscreen_base("Portal WWW", web_portal_back_event_cb, &list);
 
-    int y = 10;
     std::string ip = get_wlan0_ip();
     bool httpd_active = (system("pidof httpd >/dev/null") == 0);
 
-    // 1. Status Card
-    std::string status_txt = httpd_active ? "Status: WŁĄCZONY (Port 80)" : "Status: WYŁĄCZONY";
-    std::string url_txt = "http://" + ip + "/";
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
 
-    add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
-                      status_txt.c_str(), url_txt.c_str(), SETTINGS_ACTION_NONE);
+    lv_obj_t * status = lv_obj_create(list);
+    lv_obj_set_size(status, 440, 76);
+    lv_obj_set_pos(status, 20, 0);
+    web_portal_make_surface(status, lv_color_hex(0x004F58), 28);
 
-    // 2. Switch: Włącz teraz
-    lv_obj_t * card_man = lv_obj_create(list);
-    lv_obj_set_size(card_man, 424, 60);
-    lv_obj_set_pos(card_man, 28, y);
-    lv_obj_set_style_bg_color(card_man, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card_man, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(card_man, 14, LV_PART_MAIN);
+    web_portal_status_dot = lv_obj_create(status);
+    lv_obj_set_size(web_portal_status_dot, 8, 8);
+    lv_obj_set_pos(web_portal_status_dot, 16, 22);
+    web_portal_make_surface(web_portal_status_dot,
+                            httpd_active ? lv_color_hex(0x91D18B) : lv_color_hex(0x8D9199), 4);
 
-    lv_obj_t * lbl_man = lv_label_create(card_man);
-    lv_label_set_text(lbl_man, "Serwer WWW teraz (Ręcznie)");
-    lv_obj_set_pos(lbl_man, 16, 18);
-    lv_obj_set_style_text_color(lbl_man, lv_color_white(), LV_PART_MAIN);
+    web_portal_status_label = web_portal_make_label(status,
+        httpd_active ? "Serwer włączony" : "Serwer wyłączony",
+        34, 10, lv_color_hex(0x9CF0FA), &lv_font_montserrat_20_pl);
+    web_portal_make_label(status, ip.c_str(), 16, 43, lv_color_hex(0x8BD7DF), &lv_font_montserrat_14);
 
-    lv_obj_t * sw_man = lv_switch_create(card_man);
-    lv_obj_align(sw_man, LV_ALIGN_RIGHT_MID, -16, 0);
-    if (httpd_active) lv_obj_add_state(sw_man, LV_STATE_CHECKED);
-    else lv_obj_clear_state(sw_man, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(sw_man, web_portal_manual_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t * globe_bg = lv_obj_create(status);
+    lv_obj_set_size(globe_bg, 44, 44);
+    lv_obj_set_pos(globe_bg, 380, 16);
+    web_portal_make_surface(globe_bg, lv_color_hex(0x116872), 22);
+    lv_obj_t * globe = web_portal_make_label(globe_bg, ICON_GLOBE, 0, 0,
+                                              lv_color_hex(0x9CF0FA), &lv_font_control_icons_24);
+    lv_obj_center(globe);
 
-    y += 70;
+    lv_obj_t * controls = lv_obj_create(list);
+    lv_obj_set_size(controls, 208, 306);
+    lv_obj_set_pos(controls, 20, 88);
+    web_portal_make_surface(controls, lv_color_hex(0x1D2024), 28);
 
-    // 3. Switch: Autostart przy rozruchu
-    lv_obj_t * card_auto = lv_obj_create(list);
-    lv_obj_set_size(card_auto, 424, 60);
-    lv_obj_set_pos(card_auto, 28, y);
-    lv_obj_set_style_bg_color(card_auto, lv_color_make(0x20, 0x23, 0x2B), LV_PART_MAIN);
-    lv_obj_set_style_border_width(card_auto, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(card_auto, 14, LV_PART_MAIN);
+    lv_obj_t * overline = web_portal_make_label(controls, "STEROWANIE", 16, 17,
+                                                 lv_color_hex(0xC3C6CF), &lv_font_montserrat_14);
+    lv_obj_set_style_text_letter_space(overline, 1, LV_PART_MAIN);
 
-    lv_obj_t * lbl_auto = lv_label_create(card_auto);
-    lv_label_set_text(lbl_auto, "Uruchamiaj przy starcie panelu");
-    lv_obj_set_pos(lbl_auto, 16, 18);
-    lv_obj_set_style_text_color(lbl_auto, lv_color_white(), LV_PART_MAIN);
+    lv_obj_t * server_label = web_portal_make_label(controls, "Serwer\nWWW", 16, 49,
+                                                     lv_color_hex(0xE2E2E8), &lv_font_montserrat_20_pl);
+    lv_obj_set_width(server_label, 105);
+    lv_obj_set_style_text_line_space(server_label, 1, LV_PART_MAIN);
 
-    lv_obj_t * sw_auto = lv_switch_create(card_auto);
-    lv_obj_align(sw_auto, LV_ALIGN_RIGHT_MID, -16, 0);
-    if (g_web_autostart) lv_obj_add_state(sw_auto, LV_STATE_CHECKED);
-    else lv_obj_clear_state(sw_auto, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(sw_auto, web_portal_autostart_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    web_portal_server_switch = lv_switch_create(controls);
+    web_portal_style_switch(web_portal_server_switch);
+    lv_obj_set_pos(web_portal_server_switch, 144, 54);
+    if (httpd_active) lv_obj_add_state(web_portal_server_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(web_portal_server_switch, web_portal_manual_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    y += 75;
+    lv_obj_t * divider = lv_obj_create(controls);
+    lv_obj_set_size(divider, 176, 1);
+    lv_obj_set_pos(divider, 16, 119);
+    web_portal_make_surface(divider, lv_color_hex(0x43474E), 0);
 
-    // 4. QR Code Card
-    lv_obj_t * lbl_qr = lv_label_create(list);
-    lv_label_set_text(lbl_qr, "Zeskanuj kod QR aby otworzyć panel WWW:");
-    lv_obj_set_pos(lbl_qr, 32, y);
-    lv_obj_set_style_text_color(lbl_qr, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
-    y += 26;
+    lv_obj_t * auto_label = web_portal_make_label(controls, "Autostart\nserwera", 16, 132,
+                                                   lv_color_hex(0xE2E2E8), &lv_font_montserrat_20_pl);
+    lv_obj_set_width(auto_label, 105);
+    lv_obj_set_style_text_line_space(auto_label, 1, LV_PART_MAIN);
 
-    lv_obj_t * qr = lv_qrcode_create(list, 150, lv_color_make(0, 0, 0), lv_color_make(255, 255, 255));
+    lv_obj_t * auto_switch = lv_switch_create(controls);
+    web_portal_style_switch(auto_switch);
+    lv_obj_set_pos(auto_switch, 144, 140);
+    if (g_web_autostart) lv_obj_add_state(auto_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(auto_switch, web_portal_autostart_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    web_portal_restart_button = lv_btn_create(controls);
+    lv_obj_set_size(web_portal_restart_button, 176, 48);
+    lv_obj_set_pos(web_portal_restart_button, 16, 238);
+    web_portal_make_surface(web_portal_restart_button, lv_color_hex(0x282A2F), 24);
+    lv_obj_set_style_bg_color(web_portal_restart_button, lv_color_hex(0x343B40), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(web_portal_restart_button, LV_OPA_40, LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_add_event_cb(web_portal_restart_button, web_portal_restart_btn_cb, LV_EVENT_CLICKED, NULL);
+    web_portal_restart_label = web_portal_make_label(web_portal_restart_button, "Restart serwera", 0, 0,
+                                                      lv_color_hex(0x4FD8E6), &lv_font_montserrat_20_pl);
+    lv_obj_center(web_portal_restart_label);
+
+    lv_obj_t * qr_card = lv_obj_create(list);
+    lv_obj_set_size(qr_card, 220, 306);
+    lv_obj_set_pos(qr_card, 240, 88);
+    web_portal_make_surface(qr_card, lv_color_hex(0x1D2024), 28);
+
     std::string qr_url = "http://" + ip + "/";
+    lv_obj_t * qr = lv_qrcode_create(qr_card, 150, lv_color_black(), lv_color_white());
     lv_qrcode_update(qr, qr_url.c_str(), qr_url.length());
-    lv_obj_set_pos(qr, 165, y);
+    lv_obj_set_pos(qr, 35, 24);
 
-    y += 165;
+    lv_obj_t * qr_title = web_portal_make_label(qr_card, "Zeskanuj kod QR i\nprzejdź do panelu", 0, 0,
+                                                 lv_color_hex(0xE2E2E8), &lv_font_montserrat_20_pl);
+    lv_obj_set_style_text_align(qr_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(qr_title, LV_ALIGN_TOP_MID, 0, 192);
+    lv_obj_t * qr_url_label = web_portal_make_label(qr_card, qr_url.c_str(), 0, 0,
+                                                     lv_color_hex(0xC3C6CF), &lv_font_montserrat_14);
+    lv_obj_align(qr_url_label, LV_ALIGN_TOP_MID, 0, 258);
 
-    // 5. Restart HTTP Server Button
-    lv_obj_t * rst_btn = lv_btn_create(list);
-    lv_obj_set_size(rst_btn, 416, 44);
-    lv_obj_set_pos(rst_btn, 32, y);
-    lv_obj_set_style_bg_color(rst_btn, lv_color_make(0x00, 0x68, 0x74), LV_PART_MAIN);
-    lv_obj_set_style_radius(rst_btn, 12, LV_PART_MAIN);
-    lv_obj_add_event_cb(rst_btn, web_portal_restart_btn_cb, LV_EVENT_CLICKED, NULL);
+    web_portal_snackbar = lv_obj_create(web_portal_screen);
+    lv_obj_set_size(web_portal_snackbar, 440, 48);
+    lv_obj_set_pos(web_portal_snackbar, 20, 416);
+    web_portal_make_surface(web_portal_snackbar, lv_color_hex(0xE2E2E8), 8);
+    web_portal_make_label(web_portal_snackbar, "Serwer został uruchomiony ponownie", 16, 15,
+                           lv_color_hex(0x111318), &lv_font_montserrat_16_pl);
+    lv_obj_add_flag(web_portal_snackbar, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_t * rst_lbl = lv_label_create(rst_btn);
-    lv_label_set_text(rst_lbl, "ZRESTARTUJ SERWER HTTP");
-    lv_obj_set_style_text_font(rst_lbl, &lv_font_montserrat_16_pl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(rst_lbl, lv_color_white(), LV_PART_MAIN);
-    lv_obj_align(rst_lbl, LV_ALIGN_CENTER, 0, 0);
-
-    y += 60;
-
-    lv_obj_t * spacer = lv_obj_create(list);
-    lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, y);
+    web_portal_update_state();
 }
 
 static void add_settings_card_switch(lv_obj_t * list, int * y, const char * icon_symbol,
@@ -1660,7 +2734,7 @@ static void create_settings_screen(void) {
 
     add_settings_section(list, "ŁĄCZNOŚĆ", &y);
     add_settings_card(list, &y, ICON_WIFI, lv_color_make(0x18, 0x65, 0xA8),
-                      "Wi-Fi", wifi_status.c_str(), SETTINGS_ACTION_NONE);
+                      "Wi-Fi", wifi_status.c_str(), SETTINGS_ACTION_WIFI);
     add_settings_card(list, &y, ICON_BLUETOOTH, lv_color_make(0x4F, 0x5D, 0xB8),
                       "Bluetooth Proxy", "Planowane", SETTINGS_ACTION_NONE);
     add_settings_card(list, &y, ICON_PLUG, lv_color_make(0x38, 0x6A, 0x20),
@@ -1668,7 +2742,7 @@ static void create_settings_screen(void) {
 
     add_settings_section(list, "PANEL", &y);
     add_settings_card(list, &y, ICON_BRIGHTNESS, lv_color_make(0x9A, 0x56, 0x00),
-                      "Ekran", "Jasność i wygaszanie", SETTINGS_ACTION_CONTROLS);
+                      "Ekran", "Jasność i wygaszanie", SETTINGS_ACTION_DISPLAY);
     add_settings_card(list, &y, ICON_VOLUME, lv_color_make(0x7A, 0x48, 0x92),
                       "Dźwięk", "Głośność i mikrofon", SETTINGS_ACTION_CONTROLS);
     add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),
@@ -1727,9 +2801,13 @@ static void brightness_event_cb(lv_event_t * e) {
     lv_obj_t * slider = lv_event_get_target(e);
     int percent = lv_slider_get_value(slider);
     set_percent_label(brightness_value_label, percent);
-
+    if (auto_brightness_enabled) set_auto_brightness_enabled(false);
+    manual_brightness_percent = percent;
     int raw_val = percent * backlight_max / 100;
     hal_set_backlight(raw_val);
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED || lv_event_get_code(e) == LV_EVENT_PRESS_LOST) {
+        save_int_file("/tuya/data/ha_brightness", manual_brightness_percent);
+    }
 }
 
 static void apply_volume(int percent) {
@@ -1868,14 +2946,11 @@ static void create_control_center(lv_obj_t * scr) {
 
     backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
     if (backlight_max < 1) backlight_max = 255;
-    int brightness_raw = read_int_file("/sys/class/backlight/backlight/brightness", backlight_max * 4 / 5);
-    int brightness = brightness_raw * 100 / backlight_max;
-    if (brightness < 5) brightness = 5;
-    if (brightness > 100) brightness = 100;
+    int brightness = auto_brightness_enabled ? auto_brightness_percent : manual_brightness_percent;
 
     hal_set_backlight(brightness * backlight_max / 100);
-    create_control_slider(control_center, ICON_BRIGHTNESS, 88, 5, brightness,
-                          brightness_event_cb, &brightness_value_label);
+    brightness_slider = create_control_slider(control_center, ICON_BRIGHTNESS, 88, 5, brightness,
+                                               brightness_event_cb, &brightness_value_label);
 
     int volume = read_int_file("/tuya/data/ha_volume", 80);
     if (volume < 0 || volume > 100) volume = 80;
@@ -2025,7 +3100,7 @@ void create_onboarding_ui(const std::string &ip) {
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 65);
 
     // 4. Generate native QR Code pointing to the web page
-    std::string url = "http://" + ip + "/config.html";
+    std::string url = "http://" + ip + "/";
     
     lv_obj_t * qr = lv_qrcode_create(scr, 180, lv_color_make(0, 0, 0), lv_color_make(255, 255, 255));
     lv_qrcode_update(qr, url.c_str(), url.length());
@@ -2066,7 +3141,12 @@ static void mqtt_telemetry_timer_cb(lv_timer_t * timer) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc == 2 && (std::string(argv[1]) == "--cgi-config" || std::string(argv[1]) == "--cgi-status")) {
+        g_cgi_mode = true;
+        return std::string(argv[1]) == "--cgi-config" ? cgi_config_main() : cgi_status_main();
+    }
+
     setbuf(stdout, NULL);
     printf("[HA Panel] Initializing Native LVGL Application...\n");
     
@@ -2091,6 +3171,17 @@ int main(void) {
         return 1;
     }
 
+    backlight_max = read_int_file("/sys/class/backlight/backlight/max_brightness", 255);
+    if (backlight_max < 1) backlight_max = 255;
+    manual_brightness_percent = read_int_file("/tuya/data/ha_brightness", 80);
+    if (manual_brightness_percent < 5 || manual_brightness_percent > 100) {
+        manual_brightness_percent = 80;
+    }
+    auto_brightness_percent = manual_brightness_percent;
+    auto_brightness_enabled = read_int_file("/tuya/data/ha_auto_brightness", 0) != 0;
+    printf("[AutoBrightness] Mode: %s, manual level: %d%%.\n",
+           auto_brightness_enabled ? "automatic" : "manual", manual_brightness_percent);
+
     // 3. Check for existing Home Assistant credentials
     if (!config_exists()) {
         printf("[Onboarding] No configuration file found. Starting Smart Onboarding...\n");
@@ -2102,7 +3193,9 @@ int main(void) {
         
         // Prepare CGI script permissions and launch HTTP server on port 80
         system("chmod +x /tuya/data/www/cgi-bin/save_config.sh 2>/dev/null");
-        system("httpd -h /tuya/data/www -p 80 &");
+        if (system("pidof httpd >/dev/null") != 0) {
+            system("httpd -h /tuya/data/www -p 80 &");
+        }
         
         // Show QR code onboarding UI
         create_onboarding_ui(ip);
@@ -2115,8 +3208,12 @@ int main(void) {
             if (g_web_autostart) {
                 system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
                 system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
-                system("httpd -h /tuya/data/www -p 80 &");
-                printf("[WebPortal] Auto-started HTTP server on port 80.\n");
+                if (system("pidof httpd >/dev/null") != 0) {
+                    system("httpd -h /tuya/data/www -p 80 &");
+                    printf("[WebPortal] Auto-started HTTP server on port 80.\n");
+                } else {
+                    printf("[WebPortal] HTTP server already active on port 80.\n");
+                }
             }
             create_home_assistant_ui();
         } else {
@@ -2131,7 +3228,9 @@ int main(void) {
     // Load screen timeout setting (default: 30 seconds)
     int saved_timeout = read_int_file("/tuya/data/ha_screen_timeout", 30);
     screen_timeout_ms = saved_timeout * 1000;
+    lv_disp_trig_activity(NULL);
     lv_timer_create(screensaver_timer_cb, 500, NULL);
+    lv_timer_create(auto_brightness_timer_cb, 500, NULL);
     printf("[ScreenSaver] Screen blanker initialized. Timeout: %u seconds.\n", saved_timeout);
 
     // Initialize MQTT Client if configured

@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <title>Portal WWW - warianty Material Design 3</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --page: #0d0f12;
+            --md-sys-color-surface: #111318;
+            --md-sys-color-surface-container: #1d2024;
+            --md-sys-color-surface-container-high: #282a2f;
+            --md-sys-color-surface-container-highest: #33353a;
+            --md-sys-color-on-surface: #e2e2e8;
+            --md-sys-color-on-surface-variant: #c3c6cf;
+            --md-sys-color-outline: #8d9199;
+            --md-sys-color-outline-variant: #43474e;
+            --md-sys-color-primary: #4fd8e6;
+            --md-sys-color-on-primary: #00363d;
+            --md-sys-color-primary-container: #004f58;
+            --md-sys-color-on-primary-container: #9cf0fa;
+            --md-sys-color-tertiary: #91d18b;
+            --md-sys-color-on-tertiary: #003909;
+            --md-sys-color-error: #ffb4ab;
+            --md-sys-color-shadow: #000;
+            --shape-small: 8px;
+            --shape-medium: 12px;
+            --shape-large: 16px;
+            --shape-extra-large: 28px;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--page);
+            color: var(--md-sys-color-on-surface);
+            font-family: sans-serif;
+        }
+
+        button { font: inherit; }
+
+        .page-header {
+            width: min(1100px, calc(100% - 40px));
+            margin: 28px auto 22px;
+        }
+
+        .eyebrow {
+            margin: 0 0 6px;
+            color: var(--md-sys-color-primary);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 26px;
+            font-weight: 500;
+            letter-spacing: -.02em;
+        }
+
+        .intro {
+            max-width: 720px;
+            margin: 8px 0 0;
+            color: var(--md-sys-color-on-surface-variant);
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .comparison {
+            width: min(1100px, calc(100% - 40px));
+            display: grid;
+            grid-template-columns: repeat(2, 480px);
+            justify-content: center;
+            gap: 38px;
+            margin: 0 auto 48px;
+        }
+
+        .option-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin: 0 2px 10px;
+        }
+
+        .option-title h2 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .option-title span {
+            color: var(--md-sys-color-on-surface-variant);
+            font-size: 11px;
+        }
+
+        .device {
+            position: relative;
+            width: 480px;
+            height: 480px;
+            overflow: hidden;
+            border: 1px solid #353840;
+            background: var(--md-sys-color-surface);
+            box-shadow: 0 20px 55px rgba(0, 0, 0, .46);
+        }
+
+        .top-app-bar {
+            height: 64px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0 20px 0 12px;
+            background: var(--md-sys-color-surface);
+        }
+
+        .icon-button {
+            width: 48px;
+            height: 48px;
+            display: grid;
+            flex: 0 0 auto;
+            place-items: center;
+            border: 0;
+            border-radius: 50%;
+            background: transparent;
+            color: var(--md-sys-color-on-surface);
+            cursor: pointer;
+        }
+
+        .icon-button:hover { background: rgba(226, 226, 232, .08); }
+        .icon-button:active { background: rgba(226, 226, 232, .12); }
+        .icon-button svg { width: 24px; height: 24px; fill: currentColor; }
+
+        .app-title {
+            font-size: 22px;
+            font-weight: 400;
+            letter-spacing: -.02em;
+        }
+
+        .content-a {
+            height: 416px;
+            display: grid;
+            grid-template-rows: 70px 104px 148px 48px;
+            gap: 8px;
+            padding: 0 20px 14px;
+        }
+
+        .status-card {
+            display: flex;
+            align-items: center;
+            gap: 13px;
+            padding: 12px 16px;
+            border-radius: var(--shape-large);
+            background: var(--md-sys-color-surface-container);
+        }
+
+        .status-icon {
+            width: 42px;
+            height: 42px;
+            display: grid;
+            flex: 0 0 auto;
+            place-items: center;
+            border-radius: 50%;
+            background: rgba(145, 209, 139, .14);
+            color: var(--md-sys-color-tertiary);
+        }
+
+        .status-icon svg { width: 23px; height: 23px; fill: currentColor; }
+
+        .status-copy { min-width: 0; }
+        .status-line { display: flex; align-items: center; gap: 7px; }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            flex: 0 0 auto;
+            border-radius: 50%;
+            background: var(--md-sys-color-tertiary);
+            box-shadow: 0 0 7px rgba(145, 209, 139, .45);
+        }
+
+        .status-dot.off {
+            background: var(--md-sys-color-outline);
+            box-shadow: none;
+        }
+
+        .status-value { font-size: 15px; font-weight: 600; }
+        .address { margin-top: 3px; overflow: hidden; color: var(--md-sys-color-on-surface-variant); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+        .settings-group {
+            overflow: hidden;
+            border-radius: var(--shape-large);
+            background: var(--md-sys-color-surface-container);
+        }
+
+        .setting-row {
+            height: 52px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 0 14px 0 16px;
+        }
+
+        .setting-row + .setting-row { border-top: 1px solid var(--md-sys-color-outline-variant); }
+        .setting-label { font-size: 15px; }
+
+        .md-switch {
+            position: relative;
+            width: 48px;
+            height: 28px;
+            flex: 0 0 auto;
+        }
+
+        .md-switch input { position: absolute; opacity: 0; pointer-events: none; }
+
+        .switch-track {
+            position: absolute;
+            inset: 0;
+            border: 2px solid var(--md-sys-color-outline);
+            border-radius: 99px;
+            background: var(--md-sys-color-surface-container-highest);
+            cursor: pointer;
+            transition: background .18s, border-color .18s;
+        }
+
+        .switch-track::after {
+            content: "";
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--md-sys-color-outline);
+            transition: width .18s, height .18s, transform .18s, background .18s, top .18s, left .18s;
+        }
+
+        .md-switch input:checked + .switch-track {
+            border-color: var(--md-sys-color-primary);
+            background: var(--md-sys-color-primary);
+        }
+
+        .md-switch input:checked + .switch-track::after {
+            top: 3px;
+            left: 3px;
+            width: 18px;
+            height: 18px;
+            background: var(--md-sys-color-on-primary);
+            transform: translateX(20px);
+        }
+
+        .qr-section-a {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            border-radius: var(--shape-large);
+            background: var(--md-sys-color-surface-container);
+        }
+
+        .qr-frame {
+            display: grid;
+            place-items: center;
+            padding: 7px;
+            border-radius: var(--shape-small);
+            background: #fff;
+        }
+
+        .qr-frame canvas { display: block; width: 112px; height: 112px; image-rendering: pixelated; }
+        .qr-copy { width: 160px; }
+        .qr-copy strong { display: block; margin-bottom: 6px; font-size: 15px; font-weight: 600; }
+        .qr-copy span { color: var(--md-sys-color-on-surface-variant); font-size: 12px; line-height: 1.4; }
+
+        .restart-button {
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            border: 1px solid var(--md-sys-color-outline);
+            border-radius: 24px;
+            background: transparent;
+            color: var(--md-sys-color-primary);
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .restart-button:hover { background: rgba(79, 216, 230, .08); }
+        .restart-button:active { background: rgba(79, 216, 230, .12); }
+        .restart-button svg { width: 19px; height: 19px; fill: currentColor; }
+
+        .content-b {
+            height: 416px;
+            display: grid;
+            grid-template-rows: 76px 1fr;
+            gap: 12px;
+            padding: 0 20px 18px;
+        }
+
+        .hero-status {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            border-radius: var(--shape-extra-large);
+            background: var(--md-sys-color-primary-container);
+            color: var(--md-sys-color-on-primary-container);
+        }
+
+        .hero-status .status-value { font-size: 16px; }
+        .hero-status .address { color: rgba(156, 240, 250, .78); }
+        .hero-globe { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 50%; background: rgba(156, 240, 250, .12); }
+        .hero-globe svg { width: 24px; height: 24px; fill: currentColor; }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .control-card, .qr-card-b {
+            padding: 16px;
+            border-radius: var(--shape-extra-large);
+            background: var(--md-sys-color-surface-container);
+        }
+
+        .control-card {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .card-overline {
+            margin-bottom: 9px;
+            color: var(--md-sys-color-on-surface-variant);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .control-card .setting-row { height: 68px; padding: 0; }
+        .control-card .setting-row + .setting-row { border-top-color: var(--md-sys-color-outline-variant); }
+        .control-card .setting-label { max-width: 105px; line-height: 1.2; }
+        .control-card .restart-button { width: 100%; height: 46px; margin-top: auto; border-color: transparent; background: var(--md-sys-color-surface-container-high); }
+
+        .qr-card-b {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+
+        .qr-card-b .qr-frame { margin: 1px 0 12px; }
+        .qr-card-b canvas { width: 132px; height: 132px; }
+        .qr-card-b strong { font-size: 14px; }
+        .qr-card-b span { margin-top: 5px; color: var(--md-sys-color-on-surface-variant); font-size: 11px; }
+
+        .snackbar {
+            position: absolute;
+            z-index: 5;
+            right: 16px;
+            bottom: 16px;
+            left: 16px;
+            display: flex;
+            align-items: center;
+            min-height: 48px;
+            padding: 0 16px;
+            border-radius: var(--shape-small);
+            background: var(--md-sys-color-on-surface);
+            color: var(--md-sys-color-surface);
+            box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+            font-size: 13px;
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(14px);
+            transition: opacity .18s, transform .18s;
+        }
+
+        .snackbar.visible { opacity: 1; transform: translateY(0); }
+
+        .spinning { animation: spin .8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .option-note {
+            margin: 10px 4px 0;
+            color: var(--md-sys-color-on-surface-variant);
+            font-size: 12px;
+            line-height: 1.45;
+        }
+
+        @media (max-width: 1060px) {
+            .comparison { grid-template-columns: 480px; }
+        }
+
+        @media (max-width: 540px) {
+            .page-header, .comparison { width: 480px; margin-left: 16px; margin-right: 16px; }
+            body { overflow-x: auto; }
+        }
+    </style>
+</head>
+<body>
+    <header class="page-header">
+        <p class="eyebrow">Material Design 3 · porównanie</p>
+        <h1>Ustawienia Portalu WWW</h1>
+        <p class="intro">Dwa interaktywne warianty zaprojektowane dla rzeczywistego ekranu 480 × 480. Kliknij przełączniki i przycisk restartu, aby zobaczyć zachowanie komponentów.</p>
+    </header>
+
+    <main class="comparison">
+        <section class="option">
+            <div class="option-title"><h2>Wariant A</h2><span>Lista ustawień</span></div>
+            <div class="device" data-variant="a">
+                <header class="top-app-bar">
+                    <button class="icon-button" aria-label="Wróć">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.42-1.41L7.83 13H20v-2z"/></svg>
+                    </button>
+                    <div class="app-title">Portal WWW</div>
+                </header>
+
+                <div class="content-a">
+                    <div class="status-card">
+                        <div class="status-icon">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm6.92 6h-2.95a15.7 15.7 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.92 8zM12 4c.83 1.2 1.48 2.53 1.87 4h-3.74A13.8 13.8 0 0 1 12 4zM4.26 14a7.8 7.8 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26zm.82 2h2.95c.3 1.27.77 2.46 1.38 3.56A8.03 8.03 0 0 1 5.08 16zM8.03 8H5.08a8.03 8.03 0 0 1 4.33-3.56A15.7 15.7 0 0 0 8.03 8zM12 20a13.8 13.8 0 0 1-1.87-4h3.74A13.8 13.8 0 0 1 12 20zm2.27-6H9.73a14.4 14.4 0 0 1 0-4h4.54a14.4 14.4 0 0 1 0 4zm.32 5.56A15.7 15.7 0 0 0 15.97 16h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a7.8 7.8 0 0 1 0 4h-3.38z"/></svg>
+                        </div>
+                        <div class="status-copy">
+                            <div class="status-line"><span class="status-dot"></span><span class="status-value">Włączony</span></div>
+                            <div class="address">http://192.168.1.140/</div>
+                        </div>
+                    </div>
+
+                    <div class="settings-group">
+                        <div class="setting-row">
+                            <span class="setting-label">Serwer WWW</span>
+                            <label class="md-switch"><input class="server-switch" type="checkbox" checked><span class="switch-track"></span></label>
+                        </div>
+                        <div class="setting-row">
+                            <span class="setting-label">Autostart serwera</span>
+                            <label class="md-switch"><input type="checkbox" checked><span class="switch-track"></span></label>
+                        </div>
+                    </div>
+
+                    <div class="qr-section-a">
+                        <div class="qr-frame"><canvas class="qr" width="112" height="112"></canvas></div>
+                        <div class="qr-copy"><strong>Otwórz portal</strong><span>Zeskanuj kod aparatem telefonu połączonego z tą samą siecią.</span></div>
+                    </div>
+
+                    <button class="restart-button">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.9 9h-2.02A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                        <span>Uruchom ponownie serwer</span>
+                    </button>
+                </div>
+                <div class="snackbar">Serwer został uruchomiony ponownie</div>
+            </div>
+            <p class="option-note">Najbardziej czytelny i przewidywalny. Duże cele dotykowe, jedna kolumna i wyraźna kolejność informacji.</p>
+        </section>
+
+        <section class="option">
+            <div class="option-title"><h2>Wariant B</h2><span>Panel sterowania</span></div>
+            <div class="device" data-variant="b">
+                <header class="top-app-bar">
+                    <button class="icon-button" aria-label="Wróć">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.42-1.41L7.83 13H20v-2z"/></svg>
+                    </button>
+                    <div class="app-title">Portal WWW</div>
+                </header>
+
+                <div class="content-b">
+                    <div class="hero-status">
+                        <div class="status-copy">
+                            <div class="status-line"><span class="status-dot"></span><span class="status-value">Serwer włączony</span></div>
+                            <div class="address">192.168.1.140</div>
+                        </div>
+                        <div class="hero-globe">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm6.92 6h-2.95a15.7 15.7 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.92 8zM12 4c.83 1.2 1.48 2.53 1.87 4h-3.74A13.8 13.8 0 0 1 12 4zM4.26 14a7.8 7.8 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4H4.26zm.82 2h2.95c.3 1.27.77 2.46 1.38 3.56A8.03 8.03 0 0 1 5.08 16zM8.03 8H5.08a8.03 8.03 0 0 1 4.33-3.56A15.7 15.7 0 0 0 8.03 8zM12 20a13.8 13.8 0 0 1-1.87-4h3.74A13.8 13.8 0 0 1 12 20zm2.27-6H9.73a14.4 14.4 0 0 1 0-4h4.54a14.4 14.4 0 0 1 0 4zm.32 5.56A15.7 15.7 0 0 0 15.97 16h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a7.8 7.8 0 0 1 0 4h-3.38z"/></svg>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="control-card">
+                            <div class="card-overline">Sterowanie</div>
+                            <div class="setting-row">
+                                <span class="setting-label">Serwer WWW</span>
+                                <label class="md-switch"><input class="server-switch" type="checkbox" checked><span class="switch-track"></span></label>
+                            </div>
+                            <div class="setting-row">
+                                <span class="setting-label">Autostart serwera</span>
+                                <label class="md-switch"><input type="checkbox" checked><span class="switch-track"></span></label>
+                            </div>
+                            <button class="restart-button">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.9 9h-2.02A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                                <span>Restart serwera</span>
+                            </button>
+                        </div>
+
+                        <div class="qr-card-b">
+                            <div class="qr-frame"><canvas class="qr" width="132" height="132"></canvas></div>
+                            <strong>Zeskanuj kod QR i przejdź do panelu</strong>
+                            <span>http://192.168.1.140/</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="snackbar">Serwer został uruchomiony ponownie</div>
+            </div>
+            <p class="option-note">Bardziej kompaktowy i nowoczesny. Wszystkie funkcje mieszczą się na jednym ekranie bez przewijania.</p>
+        </section>
+    </main>
+
+    <script>
+        function drawFinder(context, x, y, module) {
+            context.fillStyle = '#000';
+            context.fillRect(x, y, module * 7, module * 7);
+            context.fillStyle = '#fff';
+            context.fillRect(x + module, y + module, module * 5, module * 5);
+            context.fillStyle = '#000';
+            context.fillRect(x + module * 2, y + module * 2, module * 3, module * 3);
+        }
+
+        function drawQr(canvas) {
+            const context = canvas.getContext('2d');
+            const cells = 29;
+            const module = Math.floor(canvas.width / (cells + 4));
+            const offset = Math.floor((canvas.width - cells * module) / 2);
+            context.fillStyle = '#fff';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.fillStyle = '#000';
+            let seed = 140;
+            for (let y = 0; y < cells; y++) {
+                for (let x = 0; x < cells; x++) {
+                    const inFinder = (x < 8 && y < 8) || (x > cells - 9 && y < 8) || (x < 8 && y > cells - 9);
+                    seed = (seed * 9301 + 49297) % 233280;
+                    if (!inFinder && seed / 233280 > .5) context.fillRect(offset + x * module, offset + y * module, module, module);
+                }
+            }
+            drawFinder(context, offset, offset, module);
+            drawFinder(context, offset + (cells - 7) * module, offset, module);
+            drawFinder(context, offset, offset + (cells - 7) * module, module);
+        }
+
+        document.querySelectorAll('.qr').forEach(drawQr);
+
+        document.querySelectorAll('.device').forEach(device => {
+            const serverSwitch = device.querySelector('.server-switch');
+            const statusDot = device.querySelector('.status-dot');
+            const statusValue = device.querySelector('.status-value');
+            const restartButton = device.querySelector('.restart-button');
+            const restartIcon = restartButton.querySelector('svg');
+            const restartLabel = restartButton.querySelector('span');
+            const snackbar = device.querySelector('.snackbar');
+            const isVariantB = device.dataset.variant === 'b';
+
+            function updateStatus() {
+                const enabled = serverSwitch.checked;
+                statusDot.classList.toggle('off', !enabled);
+                statusValue.textContent = enabled ? (isVariantB ? 'Serwer włączony' : 'Włączony') : (isVariantB ? 'Serwer wyłączony' : 'Wyłączony');
+                restartButton.disabled = !enabled;
+                restartButton.style.opacity = enabled ? '1' : '.45';
+            }
+
+            serverSwitch.addEventListener('change', updateStatus);
+            restartButton.addEventListener('click', () => {
+                if (!serverSwitch.checked) return;
+                restartButton.disabled = true;
+                restartIcon.classList.add('spinning');
+                restartLabel.textContent = 'Restartowanie...';
+                setTimeout(() => {
+                    restartButton.disabled = false;
+                    restartIcon.classList.remove('spinning');
+                    restartLabel.textContent = isVariantB ? 'Restart serwera' : 'Uruchom ponownie serwer';
+                    snackbar.classList.add('visible');
+                    setTimeout(() => snackbar.classList.remove('visible'), 2200);
+                }, 1000);
+            });
+            updateStatus();
+        });
+    </script>
+</body>
+</html>

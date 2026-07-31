@@ -7,7 +7,12 @@ native_touch_draw
 src/*.o
 
 # Exclude compiled LVGL objects
-lvgl/src/**/*.o
+lvgl/
+
+# Backups and screenshots
+panel_backups/
+screenshots/
+__pycache__/
 
 # Toolchains / temp archives
 *.tar.xz
@@ -17,6 +22,7 @@ dummy_write
 # Configuration and secrets
 *.json
 !package.json
+!www/locales/*.json
 ha_config.json
 *.env
 *.key
@@ -25,3 +31,4 @@ ha_config.json
 
 # MkDocs build output
 site/
+

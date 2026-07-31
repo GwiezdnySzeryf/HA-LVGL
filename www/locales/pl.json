@@ -1,0 +1,125 @@
+{
+  "meta": {
+    "title": "MOES Panel - prosty prototyp"
+  },
+  "header": {
+    "version": "192.168.1.140 · wersja 1.8.0",
+    "online": "Panel online",
+    "language": "Język interfejsu"
+  },
+  "nav": {
+    "label": "Nawigacja główna",
+    "overview": "Podgląd",
+    "homeAssistant": "Home Assistant",
+    "mqtt": "MQTT",
+    "system": "System"
+  },
+  "overview": {
+    "weather": "bezchmurnie",
+    "light": "Lampa stół",
+    "outlet": "Gniazdko IKEA",
+    "on": "Włączona",
+    "off": "Wyłączone",
+    "refresh": "Odśwież podgląd",
+    "autoOff": "Auto: wył.",
+    "autoSeconds": "Auto: 3 s",
+    "status": "Stan",
+    "homeAssistant": "Home Assistant",
+    "mqtt": "MQTT",
+    "connected": "Połączono",
+    "configured": "Skonfigurowano",
+    "disconnected": "Rozłączono",
+    "disabled": "Wyłączony",
+    "uptime": "Czas pracy",
+    "uptimeValue": "2 dni 4 godz.",
+    "brightness": "Jasność",
+    "screenOff": "Wyłącz ekran",
+    "screenOn": "Włącz ekran"
+  },
+  "ha": {
+    "title": "Home Assistant",
+    "description": "Połączenie oraz przyciski wyświetlane na panelu.",
+    "connection": "Połączenie",
+    "serverUrl": "Adres serwera",
+    "token": "Token dostępu",
+    "tokenPlaceholder": "Token jest zapisany",
+    "tokenHint": "Pozostaw puste, aby zachować obecny token.",
+    "buttons": "Przyciski",
+    "entity1": "Encja 1",
+    "name1": "Nazwa 1",
+    "entity2": "Encja 2",
+    "name2": "Nazwa 2",
+    "disconnect": "Rozłącz Home Assistant",
+    "disconnectHint": "Usuń zapisane połączenie i token.",
+    "disconnectButton": "Rozłącz"
+  },
+  "mqtt": {
+    "title": "MQTT",
+    "description": "Broker, dane logowania i Home Assistant Discovery.",
+    "client": "Klient MQTT",
+    "clientHint": "Telemetria i zdalne sterowanie.",
+    "broker": "Broker",
+    "host": "Host",
+    "port": "Port",
+    "username": "Użytkownik",
+    "password": "Hasło",
+    "passwordPlaceholder": "Hasło jest zapisane",
+    "baseTopic": "Główny temat",
+    "discovery": "Home Assistant Discovery",
+    "discoveryHint": "Automatycznie dodawaj encje panelu."
+  },
+  "system": {
+    "title": "System",
+    "description": "Informacje oraz podstawowe działania administracyjne.",
+    "ipAddress": "Adres IP",
+    "version": "Wersja",
+    "display": "Ekran",
+    "uptime": "Czas pracy",
+    "uptimeValue": "2 dni 4 godz.",
+    "webStartup": "Portal WWW przy starcie",
+    "webStartupHint": "Uruchamiaj serwer razem z aplikacją.",
+    "haAutostart": "Autostart HA Panel",
+    "haAutostartHint": "Watchdog utrzymuje HA Panel na ekranie po starcie urządzenia.",
+    "activeApp": "Aktywna aplikacja ekranu",
+    "appHaPanel": "HA Panel (C++ / LVGL)",
+    "appTuyaGui": "Tuya GUI (Oryginalna)",
+    "appTuyaFactory": "Tuya Testy Fabryczne",
+    "appNone": "Brak",
+    "startHaApp": "Uruchom HA Panel",
+    "startTuyaApp": "Uruchom Tuya GUI",
+    "restartApp": "Restart aplikacji",
+    "restartDevice": "Restart urządzenia"
+  },
+  "actions": {
+    "test": "Testuj połączenie",
+    "testing": "Sprawdzanie...",
+    "testSuccess": "Połączenie poprawne",
+    "discard": "Anuluj",
+    "save": "Zapisz",
+    "saving": "Zapisywanie..."
+  },
+  "save": {
+    "unsaved": "Niezapisane zmiany",
+    "restartRequired": "{section} · zastosowanie wymaga restartu aplikacji",
+    "success": "Zapisano konfigurację",
+    "sections": {
+      "homeAssistant": "Home Assistant",
+      "mqtt": "MQTT",
+      "system": "System"
+    },
+    "restarting": "Ponowne uruchamianie aplikacji...",
+    "error": "Nie udało się zapisać konfiguracji: {error}"
+  },
+  "runtime": {
+    "previewError": "Nie udało się pobrać podglądu",
+    "statusError": "Brak odpowiedzi urządzenia",
+    "disconnectConfirm": "Usunąć konfigurację Home Assistant i zapisany token?",
+    "restartAppConfirm": "Uruchomić ponownie aplikację panelu?",
+    "startTuyaConfirm": "Przełączyć ekran na oryginalną aplikację Tuya GUI?",
+    "restartDeviceConfirm": "Uruchomić ponownie całe urządzenie?",
+    "actionSent": "Polecenie zostało wysłane",
+    "daysHours": "{days} d {hours} godz.",
+    "hoursMinutes": "{hours} godz. {minutes} min",
+    "minutes": "{minutes} min"
+  }
+}

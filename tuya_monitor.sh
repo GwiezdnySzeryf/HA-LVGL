@@ -19,8 +19,13 @@ rm -f /tmp/safe_mode_triggered /tmp/safe_mode_record 2>/dev/null
 iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null
 iptables -I INPUT -p tcp --dport 23 -j ACCEPT 2>/dev/null
 
-# 3. Launch default OEM Tuya supervisor
+# 3. Launch persistent background watchdog
+if [ -x "/tuya/data/ha_watchdog.sh" ]; then
+    /tuya/data/ha_watchdog.sh &
+fi
+
+# 4. Launch default OEM Tuya supervisor
 /tuya/app/bin/daemon_avs_client.bin &
 /tuya/app/tuya_monitor.sh &
 
-echo "[$(date)] Custom monitor initialized with default Tuya software and USB ADB." >> /userdata/custom_monitor.log
+echo "[$(date)] Custom monitor initialized with default Tuya software, watchdog, and USB ADB." >> /userdata/custom_monitor.log

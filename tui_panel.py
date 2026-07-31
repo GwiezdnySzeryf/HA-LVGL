@@ -9,6 +9,9 @@ import sys
 import time
 import socket
 import subprocess
+import json
+import urllib.error
+import urllib.request
 
 # ANSI Colors
 C_RESET = "\033[0m"
@@ -24,23 +27,41 @@ C_BG_DARK = "\033[40m"
 SERIAL = "100211471004F0"
 DEFAULT_IP = "192.168.1.140"
 
+def http_request(path, method="GET", timeout=2):
+    try:
+        request = urllib.request.Request(
+            f"http://{DEFAULT_IP}{path}",
+            method=method,
+            headers={"X-Requested-With": "TPP01-Panel"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        return None
+
+def get_http_status(timeout=2):
+    response = http_request("/cgi-bin/status.sh", timeout=timeout)
+    if not response:
+        return None
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        return None
+
+def run_http_action(command, timeout=3):
+    response = http_request(f"/cgi-bin/action.sh?cmd={command}", method="POST", timeout=timeout)
+    if not response:
+        return False
+    try:
+        return bool(json.loads(response).get("ok"))
+    except json.JSONDecodeError:
+        return False
+
 def discover_panel_ip():
     global DEFAULT_IP
-    for test_ip in ["192.168.1.140", DEFAULT_IP, "192.168.1.111"]:
-        try:
-            s = socket.socket()
-            s.settimeout(0.3)
-            s.connect((test_ip, 23))
-            s.sendall(b"echo PANEL_CHECK\n")
-            time.sleep(0.15)
-            res = s.recv(1024).decode(errors="ignore")
-            s.close()
-            if "PANEL_CHECK" in res:
-                DEFAULT_IP = test_ip
-                return test_ip
-        except Exception:
-            pass
-
+    status = get_http_status(timeout=1)
+    if status and "ip" in status:
+        return DEFAULT_IP
     return "192.168.1.140"
 
 def clear_screen():
@@ -58,7 +79,17 @@ def print_header(status_text=""):
 def run_adb_cmd(cmd_bytes, timeout=5):
     """Executes a shell command via ADB socket 5037 with auto-login."""
     try:
-        sock = socket.create_connection(("127.0.0.1", 5037), timeout=timeout)
+        try:
+            sock = socket.create_connection(("127.0.0.1", 5037), timeout=1)
+        except OSError:
+            subprocess.run(
+                ["adb", "start-server"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            sock = socket.create_connection(("127.0.0.1", 5037), timeout=1)
         payload = f"host:transport:{SERIAL}".encode("utf-8")
         sock.sendall(f"{len(payload):04x}".encode("ascii") + payload)
         if sock.recv(4) != b"OKAY":
@@ -148,22 +179,39 @@ def run_panel_cmd(cmd_bytes, timeout=5):
     return res or "Brak połączenia (ADB i Telnet nieodpowiadają)"
 
 def check_process_status():
-    res = run_panel_cmd(b"ps w | grep -v grep | grep -E 'ha_panel|voice_control|httpd'")
-    if not res: return "Brak połączenia z panelem"
+    http_status = get_http_status()
+    if http_status is not None:
+        active_app = http_status.get("active_app", "none")
+        if active_app == "ha_panel":
+            app_str = f"{C_GREEN}HA Panel (AKTYWNY){C_RESET}"
+        elif active_app == "tuya_gui":
+            app_str = f"{C_MAGENTA}Tuya GUI (AKTYWNY){C_RESET}"
+        elif active_app == "tuya_factory":
+            app_str = f"{C_YELLOW}Tuya Testy Fabryczne{C_RESET}"
+        else:
+            app_str = f"{C_RED}Brak aplikacji ekranu{C_RESET}"
+
+        ha_autostart = http_status.get("ha_autostart")
+        autostart_str = f"Autostart: {C_GREEN}HA Panel{C_RESET}" if ha_autostart else f"Autostart: {C_YELLOW}Tuya GUI{C_RESET}"
+
+        return f"{app_str} | {autostart_str} | {C_GREEN}Portal WWW (ON){C_RESET}"
+
+    res = run_panel_cmd(b"ps w | grep -v grep | grep -E 'ha_panel|voice_control|httpd'", timeout=1.5)
+    if not res or res.startswith("Brak połączenia") or res.startswith("Error:"):
+        return "Brak połączenia z panelem"
     
     status = []
     if "ha_panel" in res:
-        status.append(f"{C_GREEN}ha_panel (AKTYWNY){C_RESET}")
+        status.append(f"{C_GREEN}HA Panel (AKTYWNY){C_RESET}")
+    elif "voice_control" in res:
+        status.append(f"{C_MAGENTA}Tuya GUI (AKTYWNY){C_RESET}")
     else:
-        status.append(f"{C_RED}ha_panel (INAKTYWNY){C_RESET}")
+        status.append(f"{C_RED}Brak aplikacji ekranu{C_RESET}")
 
     if "httpd" in res:
         status.append(f"{C_GREEN}Portal WWW (ON){C_RESET}")
     else:
         status.append(f"{C_YELLOW}Portal WWW (OFF){C_RESET}")
-
-    if "voice_control" in res:
-        status.append(f"{C_MAGENTA}Tuya GUI (Odpala w tle){C_RESET}")
 
     return " | ".join(status)
 
@@ -173,6 +221,15 @@ def monitor_startup(duration_sec=5):
 
     for i in range(1, duration_sec + 1):
         time.sleep(1)
+        http_status = get_http_status(timeout=1.5)
+        if http_status is not None:
+            ha_running = http_status.get("app_running")
+            if ha_running is None:
+                ha_running = bool(http_status.get("ha_connected") or http_status.get("mqtt_connected"))
+            status_str = f"{C_GREEN}AKTYWNY{C_RESET}" if ha_running else f"{C_RED}NIEAKTYWNY{C_RESET}"
+            print(f" [{i}/{duration_sec}s] Stan ha_panel: {status_str} ({C_CYAN}HTTP{C_RESET})")
+            continue
+
         res_ps = run_panel_cmd(b"ps w | grep -v grep")
         res_log = run_panel_cmd(b"cat /tmp/ha_panel.log 2>/dev/null | tail -n 3")
 
@@ -204,16 +261,37 @@ def monitor_startup(duration_sec=5):
 
 def start_application():
     print(f"\n{C_YELLOW}Uruchamianie aplikacji /tuya/data/ha_panel na panelu...{C_RESET}")
+    if run_http_action("start_ha"):
+        print(f"{C_GREEN}Polecenie uruchomienia wysłano przez Portal WWW.{C_RESET}")
+        monitor_startup(5)
+        input("Naciśnij Enter, aby kontynuować...")
+        return
+
     cmd = (
         b"rm -f /tmp/safe_mode_triggered /tmp/safe_mode_record 2>/dev/null; "
-        b"killall -STOP tuya_monitor.sh 2>/dev/null; "
         b"killall -9 voice_control voice_control_safe_mode ha_panel 2>/dev/null; "
         b"echo 255 > /sys/class/backlight/backlight/brightness; "
         b"chmod +x /tuya/data/ha_panel; "
         b"nohup /tuya/data/ha_panel > /tmp/ha_panel.log 2>&1 &"
     )
-    run_panel_cmd(cmd)
+    result = run_panel_cmd(cmd)
+    if not result or result.startswith("Brak połączenia") or result.startswith("Error:"):
+        print(f"{C_RED}Nie udało się połączyć przez HTTP, ADB ani Telnet.{C_RESET}")
+        input("Naciśnij Enter, aby kontynuować...")
+        return
     monitor_startup(5)
+    input("Naciśnij Enter, aby kontynuować...")
+
+def start_tuya_app():
+    print(f"\n{C_YELLOW}Przełączanie ekranu na Tuya GUI...{C_RESET}")
+    if run_http_action("start_tuya"):
+        print(f"{C_GREEN}Polecenie przełączenia na Tuya GUI wysłano przez Portal WWW.{C_RESET}")
+        time.sleep(2)
+        input("Naciśnij Enter, aby kontynuować...")
+        return
+    cmd = b"killall -9 ha_panel 2>/dev/null; if ! pidof voice_control >/dev/null 2>&1; then /tuya/app/tuya_monitor.sh >/dev/null 2>&1 &; fi"
+    run_panel_cmd(cmd)
+    time.sleep(2)
     input("Naciśnij Enter, aby kontynuować...")
 
 def stop_application():
@@ -247,7 +325,21 @@ def build_and_deploy():
     if adb_res.returncode == 0:
         print(f"{C_GREEN}Przesłano pomyślnie przez ADB USB!{C_RESET}")
         run_panel_cmd(b"killall -9 ha_panel 2>/dev/null; mv /tuya/data/ha_panel.tmp /tuya/data/ha_panel; chmod +x /tuya/data/ha_panel")
-        subprocess.run(["adb", "-s", SERIAL, "push", "/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/www/index.html", "/tuya/data/www/index.html"], stdout=subprocess.DEVNULL)
+        run_panel_cmd(b"mkdir -p /tuya/data/www/cgi-bin /tuya/data/www/locales")
+        web_files = [
+            ("www/index.html", "/tuya/data/www/index.html"),
+            ("www/config.html", "/tuya/data/www/config.html"),
+            ("www/i18n.js", "/tuya/data/www/i18n.js"),
+            ("www/locales/pl.json", "/tuya/data/www/locales/pl.json"),
+            ("www/locales/en.json", "/tuya/data/www/locales/en.json"),
+            ("www/cgi-bin/status.sh", "/tuya/data/www/cgi-bin/status.sh"),
+            ("www/cgi-bin/save_config.sh", "/tuya/data/www/cgi-bin/save_config.sh"),
+            ("www/cgi-bin/action.sh", "/tuya/data/www/cgi-bin/action.sh"),
+            ("www/cgi-bin/screenshot.sh", "/tuya/data/www/cgi-bin/screenshot.sh"),
+        ]
+        for local_path, remote_path in web_files:
+            subprocess.run(["adb", "-s", SERIAL, "push", f"/home/tomasz/OpenCode/Inne/TPP01_HA_Panel/{local_path}", remote_path], stdout=subprocess.DEVNULL)
+        run_panel_cmd(b"chmod +x /tuya/data/www/cgi-bin/*.sh")
     else:
         # Fallback to local HTTP server + wget over Wi-Fi
         host_ip = get_host_ip()
@@ -259,9 +351,18 @@ def build_and_deploy():
                 f"killall -9 ha_panel 2>/dev/null; "
                 f"rm -f /tuya/data/ha_panel.tmp; "
                 f"wget http://{host_ip}:8000/ha_panel -O /tuya/data/ha_panel.tmp && "
+                f"mkdir -p /tuya/data/www/cgi-bin /tuya/data/www/locales && "
                 f"wget http://{host_ip}:8000/www/index.html -O /tuya/data/www/index.html && "
+                f"wget http://{host_ip}:8000/www/config.html -O /tuya/data/www/config.html && "
+                f"wget http://{host_ip}:8000/www/i18n.js -O /tuya/data/www/i18n.js && "
+                f"wget http://{host_ip}:8000/www/locales/pl.json -O /tuya/data/www/locales/pl.json && "
+                f"wget http://{host_ip}:8000/www/locales/en.json -O /tuya/data/www/locales/en.json && "
+                f"wget http://{host_ip}:8000/www/cgi-bin/status.sh -O /tuya/data/www/cgi-bin/status.sh && "
+                f"wget http://{host_ip}:8000/www/cgi-bin/save_config.sh -O /tuya/data/www/cgi-bin/save_config.sh && "
+                f"wget http://{host_ip}:8000/www/cgi-bin/action.sh -O /tuya/data/www/cgi-bin/action.sh && "
+                f"wget http://{host_ip}:8000/www/cgi-bin/screenshot.sh -O /tuya/data/www/cgi-bin/screenshot.sh && "
                 f"mv /tuya/data/ha_panel.tmp /tuya/data/ha_panel && "
-                f"chmod +x /tuya/data/ha_panel\n"
+                f"chmod +x /tuya/data/ha_panel /tuya/data/www/cgi-bin/*.sh\n"
             ).encode("utf-8")
             run_panel_cmd(cmd)
             time.sleep(3.0)
@@ -332,31 +433,34 @@ def main_menu():
     while True:
         status = check_process_status()
         print_header(status)
-        print(f" {C_BOLD}1.{C_RESET} 🚀 Uruchom / Wznów Aplikację ({C_GREEN}ha_panel{C_RESET})")
-        print(f" {C_BOLD}2.{C_RESET} ⏹️  Zatrzymaj Aplikację")
-        print(f" {C_BOLD}3.{C_RESET} 🔨 Kompiluj & Wgraj nową wersję ({C_YELLOW}make + adb push{C_RESET})")
-        print(f" {C_BOLD}4.{C_RESET} 🌐 Przełącz Portal WWW ({C_CYAN}httpd port 80{C_RESET})")
-        print(f" {C_BOLD}5.{C_RESET} 📸 Przechwyć Zrzut Ekranu ({C_MAGENTA}Screenshot FB0{C_RESET})")
-        print(f" {C_BOLD}6.{C_RESET} 📄 Pokaż Logi Aplikacji ({C_BLUE}/tmp/ha_panel.log{C_RESET})")
-        print(f" {C_BOLD}7.{C_RESET} 🔌 Zrestartuj Panel ({C_RED}Reboot{C_RESET})")
+        print(f" {C_BOLD}1.{C_RESET} 🚀 Uruchom HA Panel ({C_GREEN}ha_panel{C_RESET})")
+        print(f" {C_BOLD}2.{C_RESET} 🏠 Uruchom Tuya GUI ({C_MAGENTA}voice_control{C_RESET})")
+        print(f" {C_BOLD}3.{C_RESET} ⏹️  Zatrzymaj Aplikację ({C_RED}ha_panel{C_RESET})")
+        print(f" {C_BOLD}4.{C_RESET} 🔨 Kompiluj & Wgraj nową wersję ({C_YELLOW}make + adb push{C_RESET})")
+        print(f" {C_BOLD}5.{C_RESET} 🌐 Przełącz Portal WWW ({C_CYAN}httpd port 80{C_RESET})")
+        print(f" {C_BOLD}6.{C_RESET} 📸 Przechwyć Zrzut Ekranu ({C_MAGENTA}Screenshot FB0{C_RESET})")
+        print(f" {C_BOLD}7.{C_RESET} 📄 Pokaż Logi Aplikacji ({C_BLUE}/tmp/ha_panel.log{C_RESET})")
+        print(f" {C_BOLD}8.{C_RESET} 🔌 Zrestartuj Panel ({C_RED}Reboot{C_RESET})")
         print(f" {C_BOLD}0.{C_RESET} 🚪 Wyjście")
         print(f"{C_CYAN}-----------------------------------------------------{C_RESET}")
 
-        choice = input("Wybierz opcję [0-7]: ").strip()
+        choice = input("Wybierz opcję [0-8]: ").strip()
 
         if choice == "1":
             start_application()
         elif choice == "2":
-            stop_application()
+            start_tuya_app()
         elif choice == "3":
-            build_and_deploy()
+            stop_application()
         elif choice == "4":
-            toggle_web_portal()
+            build_and_deploy()
         elif choice == "5":
-            capture_screenshot()
+            toggle_web_portal()
         elif choice == "6":
-            view_logs()
+            capture_screenshot()
         elif choice == "7":
+            view_logs()
+        elif choice == "8":
             if input("Czy na pewno zrestartować urządzenie? (t/N): ").lower() == "t":
                 run_panel_cmd(b"reboot")
                 print(f"{C_RED}Wysłano polecenie reboot.{C_RESET}")

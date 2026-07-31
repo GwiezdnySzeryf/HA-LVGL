@@ -1,0 +1,125 @@
+{
+  "meta": {
+    "title": "MOES Panel - simple prototype"
+  },
+  "header": {
+    "version": "192.168.1.140 · version 1.8.0",
+    "online": "Panel online",
+    "language": "Interface language"
+  },
+  "nav": {
+    "label": "Main navigation",
+    "overview": "Preview",
+    "homeAssistant": "Home Assistant",
+    "mqtt": "MQTT",
+    "system": "System"
+  },
+  "overview": {
+    "weather": "clear sky",
+    "light": "Table lamp",
+    "outlet": "IKEA outlet",
+    "on": "On",
+    "off": "Off",
+    "refresh": "Refresh preview",
+    "autoOff": "Auto: off",
+    "autoSeconds": "Auto: 3 s",
+    "status": "Status",
+    "homeAssistant": "Home Assistant",
+    "mqtt": "MQTT",
+    "connected": "Connected",
+    "configured": "Configured",
+    "disconnected": "Disconnected",
+    "disabled": "Disabled",
+    "uptime": "Uptime",
+    "uptimeValue": "2 days 4 hrs",
+    "brightness": "Brightness",
+    "screenOff": "Turn screen off",
+    "screenOn": "Turn screen on"
+  },
+  "ha": {
+    "title": "Home Assistant",
+    "description": "Connection settings and controls displayed on the panel.",
+    "connection": "Connection",
+    "serverUrl": "Server URL",
+    "token": "Access token",
+    "tokenPlaceholder": "A token is already saved",
+    "tokenHint": "Leave blank to keep the current token.",
+    "buttons": "Controls",
+    "entity1": "Entity 1",
+    "name1": "Name 1",
+    "entity2": "Entity 2",
+    "name2": "Name 2",
+    "disconnect": "Disconnect Home Assistant",
+    "disconnectHint": "Remove the saved connection and token.",
+    "disconnectButton": "Disconnect"
+  },
+  "mqtt": {
+    "title": "MQTT",
+    "description": "Broker connection, credentials and Home Assistant Discovery.",
+    "client": "MQTT client",
+    "clientHint": "Telemetry and remote control.",
+    "broker": "Broker",
+    "host": "Host",
+    "port": "Port",
+    "username": "Username",
+    "password": "Password",
+    "passwordPlaceholder": "A password is already saved",
+    "baseTopic": "Base topic",
+    "discovery": "Home Assistant Discovery",
+    "discoveryHint": "Automatically add panel entities."
+  },
+  "system": {
+    "title": "System",
+    "description": "Device information and basic administrative actions.",
+    "ipAddress": "IP address",
+    "version": "Version",
+    "display": "Display",
+    "uptime": "Uptime",
+    "uptimeValue": "2 days 4 hrs",
+    "webStartup": "Start web portal automatically",
+    "webStartupHint": "Start the server together with the application.",
+    "haAutostart": "Autostart HA Panel",
+    "haAutostartHint": "The watchdog keeps HA Panel on screen after device boot.",
+    "activeApp": "Active screen application",
+    "appHaPanel": "HA Panel (C++ / LVGL)",
+    "appTuyaGui": "Tuya GUI (Original)",
+    "appTuyaFactory": "Tuya Factory Tests",
+    "appNone": "None",
+    "startHaApp": "Launch HA Panel",
+    "startTuyaApp": "Launch Tuya GUI",
+    "restartApp": "Restart application",
+    "restartDevice": "Restart device"
+  },
+  "actions": {
+    "test": "Test connection",
+    "testing": "Testing...",
+    "testSuccess": "Connection successful",
+    "discard": "Discard",
+    "save": "Save",
+    "saving": "Saving..."
+  },
+  "save": {
+    "unsaved": "Unsaved changes",
+    "restartRequired": "{section} · applying changes requires an application restart",
+    "success": "Configuration saved",
+    "sections": {
+      "homeAssistant": "Home Assistant",
+      "mqtt": "MQTT",
+      "system": "System"
+    },
+    "restarting": "Restarting the application...",
+    "error": "Could not save configuration: {error}"
+  },
+  "runtime": {
+    "previewError": "Could not load the preview",
+    "statusError": "The device did not respond",
+    "disconnectConfirm": "Remove the Home Assistant configuration and saved token?",
+    "restartAppConfirm": "Restart the panel application?",
+    "startTuyaConfirm": "Switch screen to the original Tuya GUI application?",
+    "restartDeviceConfirm": "Restart the entire device?",
+    "actionSent": "Command sent",
+    "daysHours": "{days} d {hours} hrs",
+    "hoursMinutes": "{hours} hrs {minutes} min",
+    "minutes": "{minutes} min"
+  }
+}
