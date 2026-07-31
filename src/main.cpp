@@ -1498,11 +1498,13 @@ static void add_settings_card(lv_obj_t * list, int * y, const char * icon_symbol
     lv_label_set_text(title_label, title);
     lv_obj_set_pos(title_label, 78, 13);
     lv_obj_set_style_text_color(title_label, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
+    lv_obj_clear_flag(title_label, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t * subtitle_label = lv_label_create(card);
     lv_label_set_text(subtitle_label, subtitle);
     lv_obj_set_pos(subtitle_label, 78, 43);
     lv_obj_set_style_text_color(subtitle_label, lv_color_make(0xA9, 0xA6, 0xB0), LV_PART_MAIN);
+    lv_obj_clear_flag(subtitle_label, LV_OBJ_FLAG_CLICKABLE);
 
     if (action != SETTINGS_ACTION_NONE) {
         lv_obj_t * chevron = lv_label_create(card);
@@ -1510,6 +1512,7 @@ static void add_settings_card(lv_obj_t * list, int * y, const char * icon_symbol
         lv_obj_set_style_text_font(chevron, &lv_font_control_icons_24, LV_PART_MAIN);
         lv_obj_set_style_text_color(chevron, lv_color_make(0x8F, 0x8D, 0x98), LV_PART_MAIN);
         lv_obj_align(chevron, LV_ALIGN_RIGHT_MID, -18, 0);
+        lv_obj_clear_flag(chevron, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(card, settings_card_event_cb, LV_EVENT_CLICKED, (void *)(long)action);
     } else {
         lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
@@ -2199,6 +2202,87 @@ static void wifi_close_modal_cb(lv_event_t * e) {
     if (modal) lv_obj_del_async(modal);
 }
 
+static std::string read_sysfs_file(const char * path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return "";
+    std::string str;
+    std::getline(f, str);
+    while (!str.empty() && (str.back() == '\r' || str.back() == '\n' || str.back() == ' ')) str.pop_back();
+    return str;
+}
+
+static std::string get_wpa_status_key(const char * target_key) {
+    FILE * pipe = popen("wpa_cli -p /var/run/wpa_supplicant -i wlan0 status 2>/dev/null", "r");
+    if (!pipe) return "";
+    char line[256];
+    std::string result = "";
+    size_t key_len = strlen(target_key);
+    while (fgets(line, sizeof(line), pipe) != NULL) {
+        if (strncmp(line, target_key, key_len) == 0 && line[key_len] == '=') {
+            result = line + key_len + 1;
+            while (!result.empty() && (result.back() == '\r' || result.back() == '\n' || result.back() == ' ')) {
+                result.pop_back();
+            }
+            break;
+        }
+    }
+    pclose(pipe);
+    return result;
+}
+
+static std::string get_wlan0_signal(void) {
+    FILE * pipe = popen("wpa_cli -p /var/run/wpa_supplicant -i wlan0 signal_poll 2>/dev/null", "r");
+    if (!pipe) return "Bardzo dobry (-58 dBm)";
+    char line[256];
+    std::string rssi = "";
+    while (fgets(line, sizeof(line), pipe) != NULL) {
+        if (strncmp(line, "RSSI=", 5) == 0) {
+            rssi = line + 5;
+            while (!rssi.empty() && (rssi.back() == '\r' || rssi.back() == '\n' || rssi.back() == ' ')) {
+                rssi.pop_back();
+            }
+            break;
+        }
+    }
+    pclose(pipe);
+    return !rssi.empty() ? (rssi + " dBm") : "Bardzo dobry (-58 dBm)";
+}
+
+static std::string get_default_gateway(void) {
+    FILE * pipe = popen("ip route show dev wlan0 2>/dev/null", "r");
+    if (!pipe) return "192.168.1.1";
+    char line[256];
+    std::string gw = "192.168.1.1";
+    while (fgets(line, sizeof(line), pipe) != NULL) {
+        if (strncmp(line, "default via ", 12) == 0) {
+            char ip[64] = {0};
+            if (sscanf(line, "default via %63s", ip) == 1) {
+                gw = ip;
+                break;
+            }
+        }
+    }
+    pclose(pipe);
+    return gw;
+}
+
+static std::string get_dns_servers(void) {
+    std::ifstream f("/etc/resolv.conf");
+    if (!f.is_open()) return "8.8.8.8  4.2.2.2";
+    std::string line, dns_str;
+    while (std::getline(f, line)) {
+        if (line.find("nameserver") == 0) {
+            std::stringstream ss(line);
+            std::string kw, ip;
+            if (ss >> kw >> ip) {
+                if (!dns_str.empty()) dns_str += "  ";
+                dns_str += ip;
+            }
+        }
+    }
+    return dns_str.empty() ? "8.8.8.8  4.2.2.2" : dns_str;
+}
+
 static void open_wifi_info_modal_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 
@@ -2226,20 +2310,16 @@ static void open_wifi_info_modal_cb(lv_event_t * e) {
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
     std::string ip = get_wlan0_ip();
-    std::string ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+    std::string ssid = get_wpa_status_key("ssid");
     if (ssid.empty()) ssid = (ip != "127.0.0.1" && !ip.empty()) ? "Połączono" : "Brak sieci";
 
-    std::string rssi = exec_cmd_line("wpa_cli -i wlan0 signal_poll 2>/dev/null | grep '^RSSI=' | cut -d= -f2");
-    std::string signal_str = !rssi.empty() ? (rssi + " dBm") : "Bardzo dobry (-58 dBm)";
+    std::string signal_str = get_wlan0_signal();
 
-    std::string mac = exec_cmd_line("cat /sys/class/net/wlan0/address 2>/dev/null");
+    std::string mac = read_sysfs_file("/sys/class/net/wlan0/address");
     if (mac.empty()) mac = "8c:88:2b:00:07:14";
 
-    std::string gateway = exec_cmd_line("ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}'");
-    if (gateway.empty()) gateway = "192.168.1.1";
-
-    std::string dns = exec_cmd_line("grep nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\\n' ' '");
-    if (dns.empty()) dns = "8.8.8.8  4.2.2.2";
+    std::string gateway = get_default_gateway();
+    std::string dns = get_dns_servers();
 
     const char * keys[] = {
         "SSID / SIEĆ", "SIŁA SYGNAŁU", "ZABEZPIECZENIA", "ADRES MAC",
@@ -2357,25 +2437,25 @@ static void wifi_connect_action_cb(lv_event_t * e) {
     lv_obj_t * modal = data->modal;
 
     std::thread([ssid, pass]() {
-        std::string cmd_add = exec_cmd_line("wpa_cli -i wlan0 add_network 2>/dev/null | tail -n 1");
+        std::string cmd_add = exec_cmd_line("wpa_cli -p /var/run/wpa_supplicant -i wlan0 add_network 2>/dev/null | tail -n 1");
         int net_id = atoi(cmd_add.c_str());
 
         char cmd[512];
-        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d ssid '\"%s\"'", net_id, ssid.c_str());
+        snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d ssid '\"%s\"'", net_id, ssid.c_str());
         system(cmd);
 
         if (!pass.empty()) {
-            snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d psk '\"%s\"'", net_id, pass.c_str());
+            snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d psk '\"%s\"'", net_id, pass.c_str());
         } else {
-            snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 set_network %d key_mgmt NONE", net_id);
+            snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d key_mgmt NONE", net_id);
         }
         system(cmd);
 
-        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 enable_network %d", net_id);
+        snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 enable_network %d", net_id);
         system(cmd);
-        snprintf(cmd, sizeof(cmd), "wpa_cli -i wlan0 select_network %d", net_id);
+        snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 select_network %d", net_id);
         system(cmd);
-        system("wpa_cli -i wlan0 save_config 2>/dev/null");
+        system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 save_config 2>/dev/null");
         system("udhcpc -i wlan0 -q -n -t 5 2>/dev/null &");
     }).detach();
 
@@ -2458,33 +2538,36 @@ static void render_wifi_scan_results_timer_cb(lv_timer_t * timer) {
 
     lv_obj_clean(wifi_avail_container);
 
-    std::string current_ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+    std::string current_ssid = exec_cmd_line("wpa_cli -p /var/run/wpa_supplicant -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
 
-    std::string raw = exec_cmd_line("wpa_cli -i wlan0 scan_results 2>/dev/null");
-    std::stringstream ss(raw);
-    std::string line;
+    FILE * pipe = popen("wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan_results 2>/dev/null", "r");
+    if (!pipe) return;
+
+    char line[512];
     bool first = true;
     std::map<std::string, WifiNetworkInfo> unique_ssids;
 
-    while (std::getline(ss, line)) {
+    while (fgets(line, sizeof(line), pipe) != NULL) {
         if (first) { first = false; continue; }
-        if (line.empty()) continue;
 
-        std::vector<std::string> tokens;
-        std::stringstream line_ss(line);
-        std::string token;
-        while (std::getline(line_ss, token, '\t')) {
-            tokens.push_back(token);
-        }
+        char * bssid = strtok(line, "\t");
+        char * freq = NULL;
+        char * rssi_str = NULL;
+        char * flags = NULL;
+        char * raw_ssid = NULL;
 
-        if (tokens.size() >= 5) {
-            std::string bssid = tokens[0];
-            int rssi = atoi(tokens[2].c_str());
-            std::string flags = tokens[3];
-            std::string raw_ssid = tokens[4];
+        if (bssid) freq = strtok(NULL, "\t");
+        if (freq) rssi_str = strtok(NULL, "\t");
+        if (rssi_str) flags = strtok(NULL, "\t");
+        if (flags) raw_ssid = strtok(NULL, "\r\n");
 
-            while (!raw_ssid.empty() && (raw_ssid.back() == '\r' || raw_ssid.back() == '\n')) raw_ssid.pop_back();
+        if (bssid && rssi_str && flags && raw_ssid) {
+            int rssi = atoi(rssi_str);
             std::string ssid = unescape_wpa_ssid(raw_ssid);
+
+            while (!ssid.empty() && (ssid.back() == '\r' || ssid.back() == '\n' || ssid.back() == ' ')) {
+                ssid.pop_back();
+            }
 
             if (ssid.empty()) continue;
 
@@ -2498,6 +2581,7 @@ static void render_wifi_scan_results_timer_cb(lv_timer_t * timer) {
             }
         }
     }
+    pclose(pipe);
 
     std::vector<WifiNetworkInfo> networks;
     for (auto const & pair : unique_ssids) {
@@ -2540,6 +2624,7 @@ static void render_wifi_scan_results_timer_cb(lv_timer_t * timer) {
 
             lv_obj_t * lbl = settings_m3_label(conn_btn, "Połącz", 0, 0, M3_PRIMARY, &lv_font_montserrat_14_pl);
             lv_obj_center(lbl);
+            lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
 
             char * ssid_copy = strdup(net.ssid.c_str());
             lv_obj_add_event_cb(conn_btn, wifi_connect_item_btn_cb, LV_EVENT_CLICKED, ssid_copy);
@@ -2558,7 +2643,7 @@ static void wifi_scan_refresh_btn_cb(lv_event_t * e) {
         lv_label_set_text(wifi_scan_btn_label, "Skanowanie sieci...");
     }
 
-    system("wpa_cli -i wlan0 scan 2>/dev/null &");
+    system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan 2>/dev/null &");
     lv_timer_create(render_wifi_scan_results_timer_cb, 1200, NULL);
 }
 
@@ -2615,7 +2700,7 @@ static void create_wifi_screen(void) {
     lv_obj_set_style_text_letter_space(sec_hdr, 1, LV_PART_MAIN);
     y += 24;
 
-    std::string ssid = exec_cmd_line("wpa_cli -i wlan0 status 2>/dev/null | grep '^ssid=' | cut -d= -f2");
+    std::string ssid = get_wpa_status_key("ssid");
     if (ssid.empty()) ssid = connected ? "Aktywna sieć Wi-Fi" : "Brak połączenia";
 
     lv_obj_t * item = settings_m3_card(list, 20, y, 440, 68);
@@ -2651,6 +2736,7 @@ static void create_wifi_screen(void) {
     lv_obj_add_flag(scan_card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(scan_card, M3_SURFACE_HIGH, LV_PART_MAIN | LV_STATE_PRESSED);
     wifi_scan_btn_label = settings_m3_label(scan_card, "Skanowanie sieci...", 16, 16, M3_PRIMARY, &lv_font_montserrat_16_pl);
+    lv_obj_clear_flag(wifi_scan_btn_label, LV_OBJ_FLAG_CLICKABLE);
     icon_badge(scan_card, ICON_REFRESH, 388, 10, lv_color_hex(0x1F2A30), M3_PRIMARY);
     lv_obj_add_event_cb(scan_card, wifi_scan_refresh_btn_cb, LV_EVENT_CLICKED, NULL);
 
@@ -2662,7 +2748,7 @@ static void create_wifi_screen(void) {
     lv_obj_clear_flag(wifi_avail_container, LV_OBJ_FLAG_SCROLLABLE);
 
     // Initial async scan on opening Wi-Fi screen
-    system("wpa_cli -i wlan0 scan 2>/dev/null &");
+    system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 scan 2>/dev/null &");
     lv_timer_create(render_wifi_scan_results_timer_cb, 1200, NULL);
 }
 
