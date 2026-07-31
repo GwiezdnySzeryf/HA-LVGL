@@ -91,7 +91,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.8.1";
+const char * CURRENT_VERSION = "v1.8.2";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -195,6 +195,54 @@ std::string get_wlan0_ip() {
 // Check if config file exists
 bool config_exists() {
     return access("/tuya/data/ha_config.json", F_OK) == 0;
+}
+
+static bool is_process_running(const char * proc_name) {
+    DIR * dir = opendir("/proc");
+    if (!dir) return false;
+    struct dirent * entry;
+    bool found = false;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type == DT_DIR || entry->d_type == DT_UNKNOWN) {
+            bool is_pid = true;
+            for (int i = 0; entry->d_name[i] != '\0'; ++i) {
+                if (!isdigit(entry->d_name[i])) { is_pid = false; break; }
+            }
+            if (is_pid) {
+                char path[256];
+                snprintf(path, sizeof(path), "/proc/%s/stat", entry->d_name);
+                FILE * f = fopen(path, "r");
+                if (f) {
+                    char comm[128] = {0};
+                    if (fscanf(f, "%*d (%127[^)])", comm) == 1) {
+                        if (strcmp(comm, proc_name) == 0) {
+                            found = true;
+                            fclose(f);
+                            break;
+                        }
+                    }
+                    fclose(f);
+                }
+            }
+        }
+    }
+    closedir(dir);
+    return found;
+}
+
+static void hal_fonts_init(void) {
+    ((lv_font_t*)&lv_font_montserrat_12_pl)->fallback = &lv_font_montserrat_12;
+    ((lv_font_t*)&lv_font_montserrat_14_pl)->fallback = &lv_font_montserrat_14;
+    ((lv_font_t*)&lv_font_montserrat_16_pl)->fallback = &lv_font_montserrat_16;
+    ((lv_font_t*)&lv_font_montserrat_20_pl)->fallback = &lv_font_montserrat_20;
+    ((lv_font_t*)&lv_font_montserrat_24_pl)->fallback = &lv_font_montserrat_24;
+
+    ((lv_font_t*)&lv_font_montserrat_12)->fallback = &lv_font_control_icons_24;
+    ((lv_font_t*)&lv_font_montserrat_14)->fallback = &lv_font_control_icons_24;
+    ((lv_font_t*)&lv_font_montserrat_16)->fallback = &lv_font_control_icons_24;
+    ((lv_font_t*)&lv_font_montserrat_18)->fallback = &lv_font_control_icons_24;
+    ((lv_font_t*)&lv_font_montserrat_20)->fallback = &lv_font_control_icons_24;
+    ((lv_font_t*)&lv_font_montserrat_24)->fallback = &lv_font_control_icons_24;
 }
 
 static void append_utf8(std::string &output, unsigned int codepoint) {
@@ -1103,11 +1151,46 @@ static void update_control_state(HaControl *control) {
     }
 }
 
+static std::atomic<bool> g_ha_poll_in_progress(false);
+
 static void state_poll_timer_cb(lv_timer_t * timer) {
     (void)timer;
-    update_control_state(&ha_controls[0]);
-    update_control_state(&ha_controls[1]);
-    publish_panel_state_to_ha();
+    if (ha_url.empty() || ha_token.empty()) return;
+    if (g_ha_poll_in_progress.exchange(true)) return;
+
+    std::thread([]() {
+        std::string res0, res1;
+        bool ok0 = !ha_controls[0].entity_id.empty() && ha_request("GET", "/api/states/" + ha_controls[0].entity_id, "", &res0);
+        bool ok1 = !ha_controls[1].entity_id.empty() && ha_request("GET", "/api/states/" + ha_controls[1].entity_id, "", &res1);
+
+        publish_panel_state_to_ha();
+
+        struct PollResult {
+            bool ok0, ok1;
+            std::string state0, state1;
+        };
+        PollResult * result = new PollResult();
+        result->ok0 = ok0;
+        result->ok1 = ok1;
+        if (ok0) result->state0 = parse_json_value(res0, "state");
+        if (ok1) result->state1 = parse_json_value(res1, "state");
+
+        lv_async_call([](void * p) {
+            PollResult * res = (PollResult *)p;
+            if (res) {
+                if (res->ok0 && ha_controls[0].button) {
+                    if (res->state0 == "on") lv_obj_add_state(ha_controls[0].button, LV_STATE_CHECKED);
+                    else lv_obj_clear_state(ha_controls[0].button, LV_STATE_CHECKED);
+                }
+                if (res->ok1 && ha_controls[1].button) {
+                    if (res->state1 == "on") lv_obj_add_state(ha_controls[1].button, LV_STATE_CHECKED);
+                    else lv_obj_clear_state(ha_controls[1].button, LV_STATE_CHECKED);
+                }
+                delete res;
+            }
+            g_ha_poll_in_progress = false;
+        }, result);
+    }).detach();
 }
 
 struct OtaModalData {
@@ -2792,7 +2875,7 @@ static void web_portal_style_switch(lv_obj_t * sw) {
 
 static void web_portal_update_state(void) {
     if (!web_portal_status_label || !web_portal_server_switch) return;
-    bool active = (system("pidof httpd >/dev/null") == 0);
+    bool active = is_process_running("httpd");
     lv_label_set_text(web_portal_status_label, active ? "Serwer włączony" : "Serwer wyłączony");
     lv_obj_set_style_bg_color(web_portal_status_dot,
                               active ? lv_color_hex(0x91D18B) : lv_color_hex(0x8D9199), LV_PART_MAIN);
@@ -2826,7 +2909,7 @@ static void web_portal_manual_sw_cb(lv_event_t * e) {
     lv_obj_t * sw = lv_event_get_target(e);
     bool is_on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     if (is_on) {
-        if (system("pidof httpd >/dev/null") != 0) {
+        if (!is_process_running("httpd")) {
             system("iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null");
             system("chmod +x /tuya/data/www/cgi-bin/* 2>/dev/null");
             system("httpd -h /tuya/data/www -p 80 &");
@@ -2877,7 +2960,7 @@ static void create_web_portal_screen(void) {
     web_portal_screen = create_subscreen_base("Portal WWW", web_portal_back_event_cb, &list);
 
     std::string ip = get_wlan0_ip();
-    bool httpd_active = (system("pidof httpd >/dev/null") == 0);
+    bool httpd_active = is_process_running("httpd");
 
     lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -3114,7 +3197,7 @@ static void create_settings_screen(void) {
     add_settings_card(list, &y, ICON_HOME, lv_color_make(0x03, 0x78, 0xA6),
                       "Połączenie", ha_status.c_str(), SETTINGS_ACTION_NONE);
 
-    bool httpd_active = (system("pidof httpd >/dev/null") == 0);
+    bool httpd_active = is_process_running("httpd");
     std::string web_status = httpd_active ? (g_web_autostart ? "Włączony (Autostart)" : "Włączony (Ręcznie)") : "Wyłączony";
     add_settings_card(list, &y, ICON_GLOBE, lv_color_make(0x00, 0x68, 0x74),
                       "Portal WWW", web_status.c_str(), SETTINGS_ACTION_WEB_PORTAL);
@@ -3375,6 +3458,7 @@ void create_home_assistant_ui(void) {
     lv_label_set_text(info_label, "?");
     lv_obj_set_style_text_color(info_label, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(info_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(info_label, LV_OBJ_FLAG_CLICKABLE);
 
     // 3. Create Subtitle showing server URL (placed below logo)
     lv_obj_t * subtitle = lv_label_create(scr);
@@ -3454,6 +3538,7 @@ void create_onboarding_ui(const std::string &ip) {
     lv_label_set_text(info_label, "?");
     lv_obj_set_style_text_color(info_label, lv_color_make(255, 255, 255), LV_PART_MAIN);
     lv_obj_align(info_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(info_label, LV_OBJ_FLAG_CLICKABLE);
 
     // 3. Description
     lv_obj_t * subtitle = lv_label_create(scr);
@@ -3516,13 +3601,14 @@ int main(int argc, char **argv) {
     unlink("/tuya/data/ha_panel.old");
 
     // Ensure DHCP daemon is active on wlan0
-    if (system("pidof udhcpc >/dev/null") != 0) {
+    if (!is_process_running("udhcpc")) {
         system("udhcpc -i wlan0 -b -p /var/run/udhcpc.wlan0.pid >/dev/null 2>&1 &");
         printf("[Network] Started background udhcpc DHCP client on wlan0.\n");
     }
     
     // 1. Initialize LVGL engine
     lv_init();
+    hal_fonts_init();
 
     // 2. Initialize display and touch drivers
     if (!hal_display_init()) {
