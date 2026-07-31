@@ -1119,6 +1119,9 @@ struct OtaModalData {
 bool perform_github_ota(lv_obj_t * mbox, lv_obj_t * bar) {
     printf("[OTA] Starting OTA process...\n");
     
+    // Ensure default route is set for internet connectivity
+    system("ip route add default via 192.168.1.1 dev wlan0 2>/dev/null");
+
     // 1. Fetch latest release info via secure wget command from public repo
     std::string cmd_fetch = "wget -qO- --header=\"User-Agent: Mozilla/5.0\" "
                             "https://api.github.com/repos/GwiezdnySzeryf/HA-LVGL/releases/latest > /tmp/latest_release.json";

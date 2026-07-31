@@ -61,6 +61,9 @@ while true; do
     if ! pidof udhcpc >/dev/null 2>&1; then
         udhcpc -i wlan0 -b -p /var/run/udhcpc.wlan0.pid 2>/dev/null &
     fi
+    if ! ip route show dev wlan0 2>/dev/null | grep -q default; then
+        ip route add default via 192.168.1.1 dev wlan0 2>/dev/null
+    fi
 
     # 4. Handle Screen App (ha_panel vs Tuya GUI)
     HA_AUTOSTART=$(parse_json_bool "$CONFIG_FILE" "ha_autostart" "0")
