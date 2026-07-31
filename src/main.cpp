@@ -1284,6 +1284,7 @@ enum settings_action_t {
     SETTINGS_ACTION_WEB_PORTAL
 };
 
+static void create_settings_screen(void);
 static void create_updates_screen(void);
 static void create_diagnostics_screen(void);
 static void create_info_screen(void);
@@ -1431,7 +1432,7 @@ static void settings_back_event_cb(lv_event_t * e) {
 
 // Event callback for the Info button "?"
 static void info_btn_event_cb(lv_event_t * e) {
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) create_info_screen();
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) create_settings_screen();
 }
 
 static void settings_card_event_cb(lv_event_t * e) {
