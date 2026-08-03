@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.1";
+const char * CURRENT_VERSION = "v1.9.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -3045,10 +3045,18 @@ static void apply_assist_pipeline_result(AssistPipelineUiResult * data) {
             assist_overlay_reveal_markdown(
                 assist_overlay_utf8_character_count(assist_overlay_response_text));
 
-            assist_overlay_set_state(ASSIST_OVERLAY_DONE, "GOTOWE");
-            assist_overlay_animation_frozen = true;
-            assist_overlay_tts_level = 0;
-            assist_overlay_hide_at = custom_tick_get() + 10000;
+            const bool ask_followup = data->result.continue_conversation ||
+                (!plain_response.empty() && plain_response.back() == '?');
+
+            if (data->final_result && ask_followup) {
+                printf("[Assist] Auto-continuing conversation (question/follow-up). Opening mic...\n");
+                begin_wake_command_capture();
+            } else {
+                assist_overlay_set_state(ASSIST_OVERLAY_DONE, "GOTOWE");
+                assist_overlay_animation_frozen = true;
+                assist_overlay_tts_level = 0;
+                assist_overlay_hide_at = custom_tick_get() + 10000;
+            }
         } else {
             if (assist_status_label) lv_label_set_text(assist_status_label, "Błąd Assist");
             if (assist_result_label) lv_label_set_text(assist_result_label, data->result.error.c_str());
@@ -3605,6 +3613,27 @@ static std::string unescape_wpa_ssid(const std::string & input) {
     return out;
 }
 
+static void save_wifi_config_file(const std::string& ssid, const std::string& pass) {
+    std::string wpa_conf =
+        "ctrl_interface=/var/run/wpa_supplicant\n"
+        "update_config=1\n\n"
+        "network={\n"
+        "    ssid=\"" + ssid + "\"\n";
+    if (!pass.empty()) {
+        wpa_conf += "    psk=\"" + pass + "\"\n"
+                    "    key_mgmt=WPA-PSK\n";
+    } else {
+        wpa_conf += "    key_mgmt=NONE\n";
+    }
+    wpa_conf += "}\n";
+
+    std::ofstream f1("/tuya/data/wpa_0_8.conf");
+    if (f1.is_open()) f1 << wpa_conf;
+
+    std::ofstream f2("/etc/wpa_supplicant.conf");
+    if (f2.is_open()) f2 << wpa_conf;
+}
+
 static void wifi_connect_action_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     WifiConnectData * data = (WifiConnectData *)lv_event_get_user_data(e);
@@ -3615,6 +3644,8 @@ static void wifi_connect_action_cb(lv_event_t * e) {
     lv_obj_t * modal = data->modal;
 
     std::thread([ssid, pass]() {
+        save_wifi_config_file(ssid, pass);
+
         std::string cmd_add = exec_cmd_line("wpa_cli -p /var/run/wpa_supplicant -i wlan0 add_network 2>/dev/null | tail -n 1");
         int net_id = atoi(cmd_add.c_str());
 
@@ -3637,7 +3668,7 @@ static void wifi_connect_action_cb(lv_event_t * e) {
         snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 select_network %d", net_id);
         system(cmd);
         system("wpa_cli -p /var/run/wpa_supplicant -i wlan0 save_config 2>/dev/null");
-        system("udhcpc -i wlan0 -q -n -t 5 2>/dev/null &");
+        system("killall -9 udhcpc 2>/dev/null; udhcpc -i wlan0 -b -p /var/run/udhcpc.wlan0.pid 2>/dev/null &");
     }).detach();
 
     if (modal) lv_obj_del_async(modal);
