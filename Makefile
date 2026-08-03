@@ -26,7 +26,7 @@ CSRCS += src/lv_font_montserrat_24_pl.c
 CSRCS += src/lv_font_control_icons_24.c
 
 # Add your custom sources
-CXXSRCS += src/hal.cpp src/ha_logo.cpp src/mqtt_client.cpp src/main.cpp
+CXXSRCS += src/hal.cpp src/ha_logo.cpp src/mqtt_client.cpp src/assist_audio.cpp src/assist_pipeline_bridge.cpp src/wake_word_listener.cpp src/main.cpp
 
 # Objects mapping
 COBJS = $(CSRCS:.c=.o)
@@ -49,6 +49,13 @@ WIFI_PC_COBJS = $(addprefix $(WIFI_PC_BUILD)/,$(CSRCS:.c=.o))
 WIFI_PC_HAL_OBJ = $(WIFI_PC_BUILD)/src/hal.o
 WIFI_PC_APP_OBJ = $(WIFI_PC_BUILD)/prototypes/lvgl_wifi_m3.o
 WIFI_PC_BIN = /tmp/opencode/tpp01_wifi_m3
+SOUND_PC_BUILD = /tmp/opencode/tpp01_sound_pc
+SOUND_PC_COBJS = $(addprefix $(SOUND_PC_BUILD)/,$(CSRCS:.c=.o))
+SOUND_PC_HAL_OBJ = $(SOUND_PC_BUILD)/src/hal.o
+SOUND_PC_APP_OBJ = $(SOUND_PC_BUILD)/prototypes/lvgl_sound_m3.o
+SOUND_PC_BIN = /tmp/opencode/tpp01_sound_m3
+ASSIST_EDGE_PC_APP_OBJ = $(SOUND_PC_BUILD)/prototypes/lvgl_assist_edge_variants.o
+ASSIST_EDGE_PC_BIN = /tmp/opencode/tpp01_assist_edge_variants
 
 # 3. Compilation Rules
 all: $(BIN)
@@ -83,6 +90,34 @@ settings-preview: $(SETTINGS_PC_COBJS) $(SETTINGS_PC_HAL_OBJ) $(SETTINGS_PC_APP_
 wifi-preview: $(WIFI_PC_COBJS) $(WIFI_PC_HAL_OBJ) $(WIFI_PC_APP_OBJ)
 	@echo "[LINK_PC] $(WIFI_PC_BIN)"
 	g++ $(WIFI_PC_HAL_OBJ) $(WIFI_PC_APP_OBJ) $(WIFI_PC_COBJS) -lSDL2 -lpthread -o $(WIFI_PC_BIN)
+
+sound-preview: $(SOUND_PC_COBJS) $(SOUND_PC_HAL_OBJ) $(SOUND_PC_APP_OBJ)
+	@echo "[LINK_PC] $(SOUND_PC_BIN)"
+	g++ $(SOUND_PC_HAL_OBJ) $(SOUND_PC_APP_OBJ) $(SOUND_PC_COBJS) -lSDL2 -lpthread -o $(SOUND_PC_BIN)
+
+assist-edge-preview: $(SOUND_PC_COBJS) $(SOUND_PC_HAL_OBJ) $(ASSIST_EDGE_PC_APP_OBJ)
+	@echo "[LINK_PC] $(ASSIST_EDGE_PC_BIN)"
+	g++ $(SOUND_PC_HAL_OBJ) $(ASSIST_EDGE_PC_APP_OBJ) $(SOUND_PC_COBJS) -lSDL2 -lpthread -o $(ASSIST_EDGE_PC_BIN)
+
+$(SOUND_PC_BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "[CC_PC] $<"
+	gcc -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c11 -c $< -o $@
+
+$(SOUND_PC_HAL_OBJ): src/hal.cpp
+	@mkdir -p $(dir $@)
+	@echo "[CXX_PC] $<"
+	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
+
+$(SOUND_PC_APP_OBJ): prototypes/lvgl_sound_m3.cpp
+	@mkdir -p $(dir $@)
+	@echo "[CXX_PC] $<"
+	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
+
+$(ASSIST_EDGE_PC_APP_OBJ): prototypes/lvgl_assist_edge_variants.cpp
+	@mkdir -p $(dir $@)
+	@echo "[CXX_PC] $<"
+	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
 
 $(PORTAL_PC_BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)

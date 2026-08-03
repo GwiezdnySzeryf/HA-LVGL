@@ -54,6 +54,7 @@ markdown_extensions:
 
 nav:
   - Home Assistant LVGL App: home-assistant-lvgl-app/index.md
+  - OEM Audio Reuse: home-assistant-lvgl-app/oem-audio-reuse.md
   - Home: index.md
 
 extra:

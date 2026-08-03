@@ -47,7 +47,7 @@
  *====================*/
 
 /* Default display refresh period. LVGL will redraw the screen with this period */
-#define LV_DISP_DEF_REFRESH_PERIOD 30      /* [ms] */
+#define LV_DISP_DEF_REFRESH_PERIOD 16      /* [ms] */
 
 /* Input device read period in milliseconds */
 #define LV_INDEV_DEF_READ_PERIOD 30        /* [ms] */

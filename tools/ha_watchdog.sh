@@ -35,13 +35,17 @@ while true; do
     # 0. Always prevent Tuya safe_mode triggers
     rm -f /tmp/safe_mode_triggered /tmp/safe_mode_record 2>/dev/null
 
-    # 1. Maintain HTTP server (httpd)
+    # 1. Maintain HTTP server (httpd) for WWW Portal
     WEB_AUTOSTART=$(parse_json_bool "$CONFIG_FILE" "web_autostart" "1")
     if [ "$WEB_AUTOSTART" = "1" ]; then
-        if ! pidof httpd >/dev/null 2>&1; then
+        chmod +x /tuya/data/www/cgi-bin/*.sh 2>/dev/null
+        if ! iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null; then
             iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null
-            chmod +x /tuya/data/www/cgi-bin/*.sh 2>/dev/null
+        fi
+
+        if ! pidof httpd >/dev/null 2>&1; then
             httpd -h /tuya/data/www -p 80 &
+            echo "[Watchdog] Restarted httpd web server." >> /tmp/ha_watchdog.log
         fi
     fi
 
@@ -50,7 +54,7 @@ while true; do
         /etc/init.d/S50adbd start >/dev/null 2>&1 &
     fi
 
-    # 3. Maintain Wi-Fi wpa_supplicant & DHCP daemon
+    # 3. Maintain Wi-Fi wpa_supplicant, DHCP daemon & default route
     if ! pidof wpa_supplicant >/dev/null 2>&1; then
         if [ -f "/tuya/data/wpa_0_8.conf" ]; then
             wpa_supplicant -D nl80211 -i wlan0 -c /tuya/data/wpa_0_8.conf -B 2>/dev/null
@@ -65,8 +69,8 @@ while true; do
         ip route add default via 192.168.1.1 dev wlan0 2>/dev/null
     fi
 
-    # 4. Handle Screen App (ha_panel vs Tuya GUI)
-    HA_AUTOSTART=$(parse_json_bool "$CONFIG_FILE" "ha_autostart" "0")
+    # 4. Handle Screen Application (HA Panel vs Tuya GUI)
+    HA_AUTOSTART=$(parse_json_bool "$CONFIG_FILE" "ha_autostart" "1")
     FACTORY_ACTIVE=0
     if pidof voice_control_factory >/dev/null 2>&1 || [ -f "/tmp/product_test_flag" ]; then
         FACTORY_ACTIVE=1
@@ -85,10 +89,8 @@ while true; do
             killall -9 voice_control voice_control_safe_mode 2>/dev/null
             if [ -x "/tuya/data/ha_panel" ]; then
                 nohup /tuya/data/ha_panel >/tmp/ha_panel.log 2>&1 &
+                echo "[Watchdog] Started ha_panel app." >> /tmp/ha_watchdog.log
             fi
-        else
-            # HA Panel is not active and autostart is 0: unpause Tuya monitor
-            killall -CONT tuya_monitor.sh 2>/dev/null
         fi
     fi
 

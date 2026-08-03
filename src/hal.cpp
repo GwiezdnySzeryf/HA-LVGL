@@ -8,6 +8,27 @@
 #define WIDTH 480
 #define HEIGHT 480
 
+static uint32_t fps_window_started = 0;
+static int fps_frame_count = 0;
+static int measured_display_fps = 0;
+
+static void record_completed_frame(lv_disp_drv_t * disp_drv) {
+    if (!lv_disp_flush_is_last(disp_drv)) return;
+    const uint32_t now = lv_tick_get();
+    if (fps_window_started == 0) fps_window_started = now;
+    ++fps_frame_count;
+    const uint32_t elapsed = now - fps_window_started;
+    if (elapsed >= 1000) {
+        measured_display_fps = static_cast<int>(fps_frame_count * 1000U / elapsed);
+        fps_frame_count = 0;
+        fps_window_started = now;
+    }
+}
+
+int hal_get_display_fps(void) {
+    return measured_display_fps;
+}
+
 /*===================================================================
    1. PLATFORM CONFIGURATION: PC SIMULATOR MODE (SDL2)
  *===================================================================*/
@@ -17,7 +38,7 @@
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture *texture = NULL;
-static uint32_t t_buf[WIDTH * HEIGHT];
+uint32_t t_buf[WIDTH * HEIGHT];
 static bool pc_pressed = false;
 static int pc_x = 0;
 static int pc_y = 0;
@@ -44,6 +65,7 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
     SDL_RenderCopy(renderer, texture, NULL, NULL);
     SDL_RenderPresent(renderer);
     
+    record_completed_frame(disp_drv);
     lv_disp_flush_ready(disp_drv);
 }
 
@@ -227,26 +249,16 @@ extern "C" uint32_t custom_tick_get(void) {
 
 /* Display flush callback for hardware /dev/fb0 */
 static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
-    int32_t x, y;
+    int32_t y;
     int bytes_per_pixel = vinfo.bits_per_pixel / 8;
-    
+    const size_t row_pixels = static_cast<size_t>(area->x2 - area->x1 + 1);
+
     for (y = area->y1; y <= area->y2; y++) {
-        for (x = area->x1; x <= area->x2; x++) {
-            // Calculate exact hardware-aligned byte offset in mapped framebuffer memory
-            long int location = (x + vinfo.xoffset) * bytes_per_pixel +
-                                (y + vinfo.yoffset) * finfo.line_length;
-                                
-            if (vinfo.bits_per_pixel == 32) {
-                // Construct 32-bit pixel word strictly matching "rgba 8/16,8/8,8/0,0/0" (XRGB8888)
-                uint32_t raw_pixel = (color_p->ch.red << 16) | 
-                                     (color_p->ch.green << 8) | 
-                                     (color_p->ch.blue);
-                                     
-                uint32_t *pixel_dest = (uint32_t *)(fb_ptr + location);
-                *pixel_dest = raw_pixel;
-            }
-            color_p++;
-        }
+        const long int location = (area->x1 + vinfo.xoffset) * bytes_per_pixel +
+                                  (y + vinfo.yoffset) * finfo.line_length;
+        // LVGL ARGB8888 and framebuffer XRGB8888 share the same B,G,R byte layout.
+        memcpy(fb_ptr + location, color_p, row_pixels * sizeof(lv_color_t));
+        color_p += row_pixels;
     }
     
     // Only call pan ioctl on the very first flush to switch display from u-boot splash screen
@@ -256,6 +268,7 @@ static void display_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_
         first_flush = false;
     }
 
+    record_completed_frame(disp_drv);
     lv_disp_flush_ready(disp_drv);
 }
 

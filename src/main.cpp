@@ -17,6 +17,7 @@
 #include <dirent.h>
 #include <string>
 #include <map>
+#include <deque>
 #include <vector>
 #include <algorithm>
 #include <fstream>
@@ -25,6 +26,8 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <ctype.h>
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
@@ -34,6 +37,9 @@
 #include "../lvgl/lvgl.h"
 #include "../lvgl/src/extra/libs/qrcode/lv_qrcode.h"
 #include "mqtt_client.h"
+#include "assist_audio.h"
+#include "assist_pipeline_bridge.h"
+#include "wake_word_listener.h"
 
 // HAL declarations
 bool hal_display_init(void);
@@ -46,15 +52,19 @@ extern uint32_t g_last_wake_time;
 extern void hal_set_backlight(int raw_val);
 extern void hal_wake_screen(void);
 extern void hal_blank_screen(void);
+extern int hal_get_display_fps(void);
 extern "C" uint32_t custom_tick_get(void);
 
 MqttClient g_mqtt_client;
 MqttConfig g_mqtt_config;
+AssistAudioCapture g_assist_audio;
+WakeWordListener g_wake_word_listener;
 bool g_web_autostart = true;
 bool g_ha_autostart = false;
 bool g_cgi_mode = false;
 
 static uint32_t screen_timeout_ms = 30000; // 30 seconds default screen timeout
+static bool assist_display_active = false;
 static bool auto_brightness_enabled = false;
 static int manual_brightness_percent = 80;
 static int auto_brightness_percent = 80;
@@ -65,6 +75,10 @@ static std::string ambient_scale_path;
 static void screensaver_timer_cb(lv_timer_t * timer) {
     (void)timer;
     if (screen_timeout_ms == 0) return; // 0 = Always ON
+    if (assist_display_active) {
+        lv_disp_trig_activity(NULL);
+        return;
+    }
 
     if (!g_screen_blanked) {
         uint32_t now = custom_tick_get();
@@ -91,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.8.2";
+const char * CURRENT_VERSION = "v1.9.0";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -228,21 +242,6 @@ static bool is_process_running(const char * proc_name) {
     }
     closedir(dir);
     return found;
-}
-
-static void hal_fonts_init(void) {
-    ((lv_font_t*)&lv_font_montserrat_12_pl)->fallback = &lv_font_montserrat_12;
-    ((lv_font_t*)&lv_font_montserrat_14_pl)->fallback = &lv_font_montserrat_14;
-    ((lv_font_t*)&lv_font_montserrat_16_pl)->fallback = &lv_font_montserrat_16;
-    ((lv_font_t*)&lv_font_montserrat_20_pl)->fallback = &lv_font_montserrat_20;
-    ((lv_font_t*)&lv_font_montserrat_24_pl)->fallback = &lv_font_montserrat_24;
-
-    ((lv_font_t*)&lv_font_montserrat_12)->fallback = &lv_font_control_icons_24;
-    ((lv_font_t*)&lv_font_montserrat_14)->fallback = &lv_font_control_icons_24;
-    ((lv_font_t*)&lv_font_montserrat_16)->fallback = &lv_font_control_icons_24;
-    ((lv_font_t*)&lv_font_montserrat_18)->fallback = &lv_font_control_icons_24;
-    ((lv_font_t*)&lv_font_montserrat_20)->fallback = &lv_font_control_icons_24;
-    ((lv_font_t*)&lv_font_montserrat_24)->fallback = &lv_font_control_icons_24;
 }
 
 static void append_utf8(std::string &output, unsigned int codepoint) {
@@ -1364,7 +1363,10 @@ enum settings_action_t {
     SETTINGS_ACTION_INFO,
     SETTINGS_ACTION_UPDATES,
     SETTINGS_ACTION_MQTT,
-    SETTINGS_ACTION_WEB_PORTAL
+    SETTINGS_ACTION_WEB_PORTAL,
+    SETTINGS_ACTION_MICROPHONE,
+    SETTINGS_ACTION_ASSIST,
+    SETTINGS_ACTION_SENDSPIN
 };
 
 static void create_settings_screen(void);
@@ -1373,6 +1375,12 @@ static void create_diagnostics_screen(void);
 static void create_info_screen(void);
 static void create_mqtt_screen(void);
 static void create_display_screen(void);
+static void create_sound_screen(void);
+static void close_sound_screen(void);
+static void create_assist_screen(void);
+static void close_assist_screen(void);
+static void create_todo_screen(const char * title);
+static void close_todo_screen(void);
 static void create_wifi_screen(void);
 static void close_wifi_screen(void);
 static void create_web_portal_screen(void);
@@ -1380,6 +1388,9 @@ static void close_web_portal_screen(void);
 static int read_int_file(const char * path, int fallback);
 static void set_percent_label(lv_obj_t * label, int value);
 static void set_auto_brightness_enabled(bool enabled);
+static void settings_m3_surface(lv_obj_t * obj, lv_color_t color, int radius);
+static lv_obj_t * settings_m3_label(lv_obj_t * parent, const char * text, int x, int y,
+                                    lv_color_t color, const lv_font_t * font);
 
 static lv_obj_t * mqtt_screen = NULL;
 static lv_obj_t * mqtt_kb = NULL;
@@ -1484,6 +1495,523 @@ static void close_display_screen(void) {
     }
 }
 
+static lv_obj_t * sound_screen = NULL;
+static int sound_volume_percent = 75;
+static int sound_dac_gain = 2;
+static bool sound_quiet_enabled = false;
+static bool sound_alarms_enabled = true;
+static bool sound_ha_notifications_enabled = true;
+static bool sound_touch_enabled = true;
+static lv_obj_t * sound_volume_slider = NULL;
+static lv_obj_t * sound_volume_label = NULL;
+static lv_obj_t * sound_gain_buttons[4] = {NULL, NULL, NULL, NULL};
+static lv_obj_t * assist_screen = NULL;
+static lv_obj_t * assist_status_label = NULL;
+static lv_obj_t * assist_level_label = NULL;
+static lv_obj_t * assist_level_bar = NULL;
+static lv_obj_t * assist_result_label = NULL;
+static lv_obj_t * assist_ptt_button = NULL;
+static lv_obj_t * assist_new_conversation_button = NULL;
+static lv_timer_t * assist_level_timer = NULL;
+static std::vector<int16_t> assist_pcm_samples;
+static std::string assist_conversation_id;
+static uint32_t assist_conversation_expires_at = 0;
+struct AssistHistoryEntry {
+    std::string transcript;
+    std::string response;
+};
+static std::deque<AssistHistoryEntry> assist_history;
+static std::atomic<bool> assist_pipeline_running(false);
+static std::atomic<uint32_t> assist_pipeline_generation(0);
+static std::atomic<bool> assist_wake_pending(false);
+static std::atomic<bool> assist_wake_speech_detected(false);
+static std::atomic<uint32_t> assist_wake_last_voice_at(0);
+static bool assist_wake_capture_active = false;
+static uint32_t assist_wake_capture_started_at = 0;
+static uint32_t assist_wake_restart_after = 0;
+static lv_obj_t * todo_screen = NULL;
+
+enum AssistOverlayState {
+    ASSIST_OVERLAY_LISTENING,
+    ASSIST_OVERLAY_PROCESSING,
+    ASSIST_OVERLAY_TRANSCRIPT,
+    ASSIST_OVERLAY_SPEAKING,
+    ASSIST_OVERLAY_DONE,
+    ASSIST_OVERLAY_ERROR
+};
+
+enum AssistMarkdownStyle {
+    ASSIST_MARKDOWN_NORMAL,
+    ASSIST_MARKDOWN_EMPHASIS,
+    ASSIST_MARKDOWN_HEADING
+};
+
+struct AssistMarkdownRun {
+    std::string text;
+    AssistMarkdownStyle style;
+};
+
+static lv_obj_t * assist_overlay = NULL;
+static lv_obj_t * assist_overlay_status = NULL;
+static lv_obj_t * assist_overlay_text = NULL;
+static lv_obj_t * assist_overlay_user = NULL;
+static lv_obj_t * assist_overlay_response = NULL;
+static lv_obj_t * assist_overlay_response_scroll = NULL;
+static lv_obj_t * assist_overlay_segments[14] = {NULL};
+static lv_timer_t * assist_overlay_timer = NULL;
+static AssistOverlayState assist_overlay_state = ASSIST_OVERLAY_LISTENING;
+static uint32_t assist_overlay_started_at = 0;
+static uint32_t assist_overlay_response_started_at = 0;
+static uint32_t assist_overlay_hide_at = 0;
+static uint32_t assist_overlay_last_fps_log = 0;
+static size_t assist_overlay_response_characters = 0;
+static int assist_overlay_response_scroll_y = 0;
+static uint32_t assist_overlay_response_last_scroll_at = 0;
+static std::string assist_overlay_response_text;
+static std::vector<AssistMarkdownRun> assist_overlay_markdown_runs;
+static std::vector<lv_span_t *> assist_overlay_markdown_spans;
+static std::vector<size_t> assist_overlay_markdown_revealed;
+static bool assist_overlay_animation_frozen = false;
+static int assist_overlay_tts_level = 0;
+
+struct AssistPipelineUiResult {
+    uint32_t generation;
+    AssistPipelineResult result;
+    bool final_result;
+};
+
+static std::mutex assist_pipeline_result_mutex;
+static std::deque<AssistPipelineUiResult *> assist_pipeline_pending_results;
+
+static void hide_assist_overlay(void) {
+    assist_display_active = false;
+    lv_disp_trig_activity(NULL);
+    if (assist_overlay_timer) {
+        lv_timer_del(assist_overlay_timer);
+        assist_overlay_timer = NULL;
+    }
+    if (assist_overlay) lv_obj_del_async(assist_overlay);
+    assist_overlay = NULL;
+    assist_overlay_status = NULL;
+    assist_overlay_text = NULL;
+    assist_overlay_user = NULL;
+    assist_overlay_response = NULL;
+    assist_overlay_response_scroll = NULL;
+    for (int i = 0; i < 14; ++i) assist_overlay_segments[i] = NULL;
+    assist_overlay_response_started_at = 0;
+    assist_overlay_response_characters = 0;
+    assist_overlay_response_scroll_y = 0;
+    assist_overlay_response_last_scroll_at = 0;
+    assist_overlay_response_text.clear();
+    assist_overlay_markdown_runs.clear();
+    assist_overlay_markdown_spans.clear();
+    assist_overlay_markdown_revealed.clear();
+    assist_overlay_animation_frozen = false;
+    assist_overlay_tts_level = 0;
+    assist_overlay_hide_at = 0;
+}
+
+static size_t assist_overlay_utf8_prefix_bytes(const std::string& text, size_t characters) {
+    size_t bytes = 0;
+    size_t count = 0;
+    while (bytes < text.size() && count < characters) {
+        const unsigned char value = static_cast<unsigned char>(text[bytes]);
+        size_t width = 1;
+        if ((value & 0xE0) == 0xC0) width = 2;
+        else if ((value & 0xF0) == 0xE0) width = 3;
+        else if ((value & 0xF8) == 0xF0) width = 4;
+        bytes = std::min(text.size(), bytes + width);
+        ++count;
+    }
+    return bytes;
+}
+
+static size_t assist_overlay_utf8_character_count(const std::string& text) {
+    size_t count = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) ++count;
+    }
+    return count;
+}
+
+static void assist_markdown_append_run(std::vector<AssistMarkdownRun> * runs,
+                                       AssistMarkdownStyle style, const std::string& text) {
+    if (text.empty()) return;
+    if (!runs->empty() && runs->back().style == style) runs->back().text += text;
+    else runs->push_back(AssistMarkdownRun{text, style});
+}
+
+static std::vector<AssistMarkdownRun> assist_parse_markdown(const std::string& markdown) {
+    std::vector<AssistMarkdownRun> runs;
+    size_t line_start = 0;
+    while (line_start < markdown.size()) {
+        const size_t newline = markdown.find('\n', line_start);
+        const bool has_newline = newline != std::string::npos;
+        std::string line = markdown.substr(line_start,
+            has_newline ? newline - line_start : markdown.size() - line_start);
+        AssistMarkdownStyle base_style = ASSIST_MARKDOWN_NORMAL;
+        size_t heading_marks = 0;
+        while (heading_marks < line.size() && heading_marks < 3 && line[heading_marks] == '#') {
+            ++heading_marks;
+        }
+        if (heading_marks > 0 && heading_marks < line.size() && line[heading_marks] == ' ') {
+            line.erase(0, heading_marks + 1);
+            base_style = ASSIST_MARKDOWN_HEADING;
+        } else if (line.size() >= 2 && (line[0] == '-' || line[0] == '*') && line[1] == ' ') {
+            line.replace(0, 2, "• ");
+        }
+
+        bool emphasis = false;
+        size_t cursor = 0;
+        while (cursor < line.size()) {
+            const size_t marker = line.find("**", cursor);
+            const size_t end = marker == std::string::npos ? line.size() : marker;
+            assist_markdown_append_run(&runs,
+                base_style == ASSIST_MARKDOWN_HEADING ? base_style :
+                    (emphasis ? ASSIST_MARKDOWN_EMPHASIS : ASSIST_MARKDOWN_NORMAL),
+                line.substr(cursor, end - cursor));
+            if (marker == std::string::npos) break;
+            emphasis = !emphasis;
+            cursor = marker + 2;
+        }
+        if (has_newline) assist_markdown_append_run(&runs, base_style, "\n");
+        line_start = has_newline ? newline + 1 : markdown.size();
+    }
+    if (runs.empty()) runs.push_back(AssistMarkdownRun{"", ASSIST_MARKDOWN_NORMAL});
+    return runs;
+}
+
+static std::string assist_markdown_plain_text(const std::string& markdown) {
+    const std::vector<AssistMarkdownRun> runs = assist_parse_markdown(markdown);
+    std::string plain;
+    for (size_t i = 0; i < runs.size(); ++i) plain += runs[i].text;
+    return plain;
+}
+
+static void assist_overlay_prepare_markdown(const std::string& markdown) {
+    if (!assist_overlay_response) return;
+    while (lv_spangroup_get_child_cnt(assist_overlay_response) > 0) {
+        lv_spangroup_del_span(assist_overlay_response,
+                              lv_spangroup_get_child(assist_overlay_response, 0));
+    }
+    assist_overlay_markdown_runs = assist_parse_markdown(markdown);
+    assist_overlay_markdown_spans.clear();
+    assist_overlay_markdown_revealed.assign(assist_overlay_markdown_runs.size(), 0);
+    assist_overlay_response_text.clear();
+    for (size_t i = 0; i < assist_overlay_markdown_runs.size(); ++i) {
+        assist_overlay_response_text += assist_overlay_markdown_runs[i].text;
+        lv_span_t * span = lv_spangroup_new_span(assist_overlay_response);
+        lv_span_set_text(span, "");
+        lv_style_set_text_font(&span->style, &lv_font_montserrat_24_pl);
+        lv_color_t color = lv_color_hex(0xEDF4F6);
+        if (assist_overlay_markdown_runs[i].style == ASSIST_MARKDOWN_EMPHASIS) {
+            color = lv_color_hex(0x4FD8E6);
+        } else if (assist_overlay_markdown_runs[i].style == ASSIST_MARKDOWN_HEADING) {
+            color = lv_color_hex(0x62A9FF);
+        }
+        lv_style_set_text_color(&span->style, color);
+        assist_overlay_markdown_spans.push_back(span);
+    }
+    lv_spangroup_refr_mode(assist_overlay_response);
+}
+
+static void assist_overlay_reveal_markdown(size_t characters) {
+    size_t remaining = characters;
+    for (size_t i = 0; i < assist_overlay_markdown_runs.size(); ++i) {
+        const size_t run_characters =
+            assist_overlay_utf8_character_count(assist_overlay_markdown_runs[i].text);
+        const size_t visible = std::min(run_characters, remaining);
+        if (visible != assist_overlay_markdown_revealed[i]) {
+            assist_overlay_markdown_revealed[i] = visible;
+            const size_t bytes = assist_overlay_utf8_prefix_bytes(
+                assist_overlay_markdown_runs[i].text, visible);
+            lv_span_set_text(assist_overlay_markdown_spans[i],
+                             assist_overlay_markdown_runs[i].text.substr(0, bytes).c_str());
+        }
+        remaining = remaining > run_characters ? remaining - run_characters : 0;
+    }
+    lv_spangroup_refr_mode(assist_overlay_response);
+}
+
+static lv_color_t assist_overlay_state_color(AssistOverlayState state) {
+    if (state == ASSIST_OVERLAY_TRANSCRIPT) return lv_color_hex(0x62A9FF);
+    if (state == ASSIST_OVERLAY_SPEAKING) return lv_color_hex(0xA58BFF);
+    if (state == ASSIST_OVERLAY_DONE) return lv_color_hex(0x66D69A);
+    if (state == ASSIST_OVERLAY_ERROR) return lv_color_hex(0xE46E7D);
+    return lv_color_hex(0x4FD8E6);
+}
+
+static void assist_overlay_set_text(const std::string& text) {
+    if (!assist_overlay_text) return;
+    lv_label_set_text(assist_overlay_text, text.c_str());
+    lv_obj_clear_flag(assist_overlay_text, LV_OBJ_FLAG_HIDDEN);
+    if (assist_overlay_user) lv_obj_add_flag(assist_overlay_user, LV_OBJ_FLAG_HIDDEN);
+    if (assist_overlay_response_scroll) {
+        lv_obj_add_flag(assist_overlay_response_scroll, LV_OBJ_FLAG_HIDDEN);
+    }
+    assist_overlay_response_started_at = 0;
+    assist_overlay_response_scroll_y = 0;
+    assist_overlay_response_last_scroll_at = 0;
+    assist_overlay_response_text.clear();
+    assist_overlay_animation_frozen = false;
+    assist_overlay_tts_level = 0;
+}
+
+static void assist_overlay_set_state(AssistOverlayState state, const char * status) {
+    assist_overlay_state = state;
+    assist_overlay_started_at = custom_tick_get();
+    assist_overlay_hide_at = 0;
+    assist_overlay_animation_frozen = state == ASSIST_OVERLAY_ERROR;
+    if (assist_overlay_status) lv_label_set_text(assist_overlay_status, status);
+    const lv_color_t color = assist_overlay_state_color(state);
+    if (assist_overlay_status) lv_obj_set_style_text_color(assist_overlay_status, color, LV_PART_MAIN);
+    for (int i = 0; i < 14; ++i) {
+        if (assist_overlay_segments[i]) {
+            lv_obj_set_style_bg_color(assist_overlay_segments[i], color, LV_PART_MAIN);
+        }
+    }
+}
+
+static void assist_overlay_show_transcript(const std::string& transcript) {
+    if (!assist_overlay_user) return;
+    assist_overlay_set_state(ASSIST_OVERLAY_TRANSCRIPT, "USŁYSZAŁEM");
+    lv_obj_add_flag(assist_overlay_text, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(assist_overlay_user, LV_OBJ_FLAG_HIDDEN);
+    if (assist_overlay_response_scroll) {
+        lv_obj_add_flag(assist_overlay_response_scroll, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(assist_overlay_user, transcript.c_str());
+    lv_obj_set_y(assist_overlay_user, 166);
+    assist_overlay_response_started_at = 0;
+}
+
+static void assist_overlay_show_response(const std::string& transcript,
+                                         const std::string& response) {
+    if (!assist_overlay_user || !assist_overlay_response || !assist_overlay_response_scroll) return;
+    assist_overlay_set_state(ASSIST_OVERLAY_SPEAKING, "ODPOWIADAM");
+    lv_obj_add_flag(assist_overlay_text, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(assist_overlay_user, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(assist_overlay_response_scroll, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(assist_overlay_user, transcript.c_str());
+    lv_obj_set_y(assist_overlay_user, 166);
+    lv_obj_scroll_to_y(assist_overlay_response_scroll, 0, LV_ANIM_OFF);
+    assist_overlay_prepare_markdown(response);
+    assist_overlay_response_characters = 0;
+    assist_overlay_response_scroll_y = 0;
+    assist_overlay_response_started_at = custom_tick_get();
+    assist_overlay_response_last_scroll_at = assist_overlay_response_started_at;
+}
+
+static void assist_overlay_cancel_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    ++assist_pipeline_generation;
+    assist_wake_capture_active = false;
+    g_assist_audio.stop();
+    assist_wake_restart_after = custom_tick_get() + 1000;
+    hide_assist_overlay();
+    if (!assist_pipeline_running) {
+        if (assist_status_label) lv_label_set_text(assist_status_label, "Gotowy");
+        if (assist_ptt_button) lv_obj_clear_state(assist_ptt_button, LV_STATE_DISABLED);
+        if (assist_new_conversation_button) {
+            lv_obj_clear_state(assist_new_conversation_button, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void assist_overlay_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (!assist_overlay) return;
+    const uint32_t now = custom_tick_get();
+    if (assist_overlay_hide_at && static_cast<int32_t>(now - assist_overlay_hide_at) >= 0) {
+        hide_assist_overlay();
+        return;
+    }
+    const uint32_t elapsed = now - assist_overlay_started_at;
+    if (now - assist_overlay_last_fps_log >= 2000) {
+        assist_overlay_last_fps_log = now;
+        printf("[AssistOverlay] measured_fps=%d state=%d\n", hal_get_display_fps(),
+               static_cast<int>(assist_overlay_state));
+    }
+    if (assist_overlay_response_started_at && assist_overlay_user && assist_overlay_response) {
+        const uint32_t transition = now - assist_overlay_response_started_at;
+        const int user_y = transition >= 420 ? 94 : 166 - static_cast<int>(transition * 72 / 420);
+        lv_obj_set_y(assist_overlay_user, user_y);
+        const size_t characters = std::min<size_t>(transition / 62,
+            assist_overlay_utf8_character_count(assist_overlay_response_text));
+        if (characters != assist_overlay_response_characters) {
+            assist_overlay_response_characters = characters;
+            assist_overlay_reveal_markdown(characters);
+        }
+        lv_obj_update_layout(assist_overlay_response_scroll);
+        const int max_scroll = std::max(0, lv_obj_get_height(assist_overlay_response) -
+                                            lv_obj_get_height(assist_overlay_response_scroll));
+        const uint32_t scroll_elapsed = now - assist_overlay_response_last_scroll_at;
+        if (max_scroll > assist_overlay_response_scroll_y && scroll_elapsed >= 40) {
+            assist_overlay_response_scroll_y = std::min(max_scroll,
+                assist_overlay_response_scroll_y + static_cast<int>(scroll_elapsed / 40));
+            assist_overlay_response_last_scroll_at = now;
+            lv_obj_scroll_to_y(assist_overlay_response_scroll, assist_overlay_response_scroll_y,
+                               LV_ANIM_OFF);
+        }
+    }
+
+    const int level = assist_overlay_state == ASSIST_OVERLAY_LISTENING
+        ? g_assist_audio.level_percent() : 0;
+    for (int i = 0; i < 14; ++i) {
+        if (!assist_overlay_segments[i]) continue;
+        if (assist_overlay_animation_frozen) {
+            lv_obj_set_height(assist_overlay_segments[i], 7);
+            lv_obj_set_y(assist_overlay_segments[i], 473);
+            lv_obj_set_style_bg_opa(assist_overlay_segments[i], 180, LV_PART_MAIN);
+            continue;
+        }
+        const int phase = static_cast<int>((elapsed / 7 + i * 23) % 100);
+        const int triangle = phase <= 50 ? phase : 100 - phase;
+        int amplitude = assist_overlay_state == ASSIST_OVERLAY_SPEAKING
+            ? 6 + assist_overlay_tts_level * 24 / 100 : 14;
+        if (assist_overlay_state == ASSIST_OVERLAY_PROCESSING) amplitude = 10;
+        int height = 4 + triangle * amplitude / 50;
+        if (assist_overlay_state == ASSIST_OVERLAY_SPEAKING) {
+            height += assist_overlay_tts_level / 8;
+        }
+        if (assist_overlay_state == ASSIST_OVERLAY_TRANSCRIPT) height = 7;
+        if (assist_overlay_state == ASSIST_OVERLAY_LISTENING) height += level / 10;
+        lv_obj_set_height(assist_overlay_segments[i], height);
+        lv_obj_set_y(assist_overlay_segments[i], 480 - height);
+        lv_obj_set_style_bg_opa(assist_overlay_segments[i], 100 + triangle * 3, LV_PART_MAIN);
+    }
+}
+
+static void show_assist_overlay(AssistOverlayState state, const char * status,
+                                const std::string& text) {
+    assist_display_active = true;
+    lv_disp_trig_activity(NULL);
+    if (g_screen_blanked) hal_wake_screen();
+    if (assist_overlay) {
+        lv_obj_move_foreground(assist_overlay);
+        assist_overlay_set_state(state, status);
+        assist_overlay_set_text(text);
+        return;
+    }
+
+    assist_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(assist_overlay);
+    lv_obj_set_size(assist_overlay, 480, 480);
+    lv_obj_align(assist_overlay, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(assist_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(assist_overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(assist_overlay, lv_color_hex(0x0B1017), LV_PART_MAIN);
+
+    lv_obj_t * title = settings_m3_label(assist_overlay, "ASSIST  •  SEGMENTY", 36, 24,
+                                          lv_color_hex(0x9BAAB0), &lv_font_montserrat_12_pl);
+    lv_obj_set_width(title, 300);
+    lv_obj_set_style_text_letter_space(title, 2, LV_PART_MAIN);
+
+    assist_overlay_status = settings_m3_label(assist_overlay, status, 0, 0,
+                                               lv_color_hex(0x4FD8E6), &lv_font_montserrat_14_pl);
+    lv_obj_set_width(assist_overlay_status, 408);
+    lv_obj_set_pos(assist_overlay_status, 36, 62);
+    lv_obj_set_style_text_letter_space(assist_overlay_status, 2, LV_PART_MAIN);
+
+    assist_overlay_text = settings_m3_label(assist_overlay, text.c_str(), 36, 110,
+                                             lv_color_hex(0xEDF4F6), &lv_font_montserrat_24_pl);
+    lv_obj_set_width(assist_overlay_text, 408);
+    lv_label_set_long_mode(assist_overlay_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_line_space(assist_overlay_text, 8, LV_PART_MAIN);
+
+    assist_overlay_user = settings_m3_label(assist_overlay, "", 84, 166,
+                                             lv_color_hex(0xB8CAD0), &lv_font_montserrat_20_pl);
+    lv_obj_set_width(assist_overlay_user, 360);
+    lv_obj_set_style_text_align(assist_overlay_user, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_label_set_long_mode(assist_overlay_user, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(assist_overlay_user, LV_OBJ_FLAG_HIDDEN);
+
+    assist_overlay_response_scroll = lv_obj_create(assist_overlay);
+    lv_obj_remove_style_all(assist_overlay_response_scroll);
+    lv_obj_set_size(assist_overlay_response_scroll, 408, 238);
+    lv_obj_set_pos(assist_overlay_response_scroll, 36, 210);
+    lv_obj_set_scroll_dir(assist_overlay_response_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(assist_overlay_response_scroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(assist_overlay_response_scroll, LV_OBJ_FLAG_HIDDEN);
+    assist_overlay_response = lv_spangroup_create(assist_overlay_response_scroll);
+    lv_obj_remove_style_all(assist_overlay_response);
+    lv_obj_set_width(assist_overlay_response, 392);
+    lv_obj_set_pos(assist_overlay_response, 0, 0);
+    lv_spangroup_set_mode(assist_overlay_response, LV_SPAN_MODE_BREAK);
+    lv_spangroup_set_align(assist_overlay_response, LV_TEXT_ALIGN_LEFT);
+    lv_spangroup_set_lines(assist_overlay_response, -1);
+    lv_obj_set_style_text_font(assist_overlay_response, &lv_font_montserrat_24_pl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(assist_overlay_response, lv_color_hex(0xEDF4F6), LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(assist_overlay_response, 8, LV_PART_MAIN);
+
+    lv_obj_t * cancel = lv_btn_create(assist_overlay);
+    lv_obj_set_size(cancel, 96, 36);
+    lv_obj_set_pos(cancel, 368, 16);
+    settings_m3_surface(cancel, lv_color_hex(0x25313A), 18);
+    lv_obj_set_style_bg_opa(cancel, 210, LV_PART_MAIN);
+    lv_obj_add_event_cb(cancel, assist_overlay_cancel_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * cancel_label = settings_m3_label(cancel, "Anuluj", 0, 0,
+                                                lv_color_hex(0xD5E5E7), &lv_font_montserrat_12_pl);
+    lv_obj_center(cancel_label);
+
+    for (int i = 0; i < 14; ++i) {
+        assist_overlay_segments[i] = lv_obj_create(assist_overlay);
+        lv_obj_remove_style_all(assist_overlay_segments[i]);
+        lv_obj_set_size(assist_overlay_segments[i], 22, 8);
+        lv_obj_set_pos(assist_overlay_segments[i], 8 + i * 34, 472);
+        lv_obj_set_style_radius(assist_overlay_segments[i], 6, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(assist_overlay_segments[i], LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_clear_flag(assist_overlay_segments[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    assist_overlay_timer = lv_timer_create(assist_overlay_timer_cb, 16, NULL);
+    assist_overlay_set_state(state, status);
+    assist_overlay_set_text(text);
+}
+
+static void close_sound_screen(void) {
+    if (sound_screen) {
+        lv_obj_del_async(sound_screen);
+        sound_screen = NULL;
+        sound_volume_slider = NULL;
+        sound_volume_label = NULL;
+        for (int i = 0; i < 4; ++i) sound_gain_buttons[i] = NULL;
+    }
+}
+
+static void close_todo_screen(void) {
+    if (todo_screen) {
+        lv_obj_del_async(todo_screen);
+        todo_screen = NULL;
+    }
+}
+
+static void close_assist_screen(void) {
+    if (!assist_screen) return;
+    ++assist_pipeline_generation;
+    hide_assist_overlay();
+    {
+        std::lock_guard<std::mutex> lock(assist_pipeline_result_mutex);
+        while (!assist_pipeline_pending_results.empty()) {
+            delete assist_pipeline_pending_results.front();
+            assist_pipeline_pending_results.pop_front();
+        }
+    }
+    g_assist_audio.stop();
+    if (assist_level_timer) {
+        lv_timer_del(assist_level_timer);
+        assist_level_timer = NULL;
+    }
+    lv_obj_del_async(assist_screen);
+    assist_screen = NULL;
+    assist_status_label = NULL;
+    assist_level_label = NULL;
+    assist_level_bar = NULL;
+    assist_result_label = NULL;
+    assist_ptt_button = NULL;
+    assist_new_conversation_button = NULL;
+}
+
 static void close_wifi_screen(void) {
     if (wifi_screen) {
         lv_obj_del_async(wifi_screen);
@@ -1501,6 +2029,9 @@ static void close_settings(void) {
     close_diagnostics_screen();
     close_info_screen();
     close_display_screen();
+    close_sound_screen();
+    close_assist_screen();
+    close_todo_screen();
     close_wifi_screen();
     close_mqtt_screen();
     close_web_portal_screen();
@@ -1523,8 +2054,7 @@ static void settings_card_event_cb(lv_event_t * e) {
     settings_action_t action = (settings_action_t)(long)lv_event_get_user_data(e);
 
     if (action == SETTINGS_ACTION_CONTROLS) {
-        close_settings();
-        lv_obj_set_y(control_center, 0);
+        create_sound_screen();
     } else if (action == SETTINGS_ACTION_DISPLAY) {
         create_display_screen();
     } else if (action == SETTINGS_ACTION_WIFI) {
@@ -1539,6 +2069,12 @@ static void settings_card_event_cb(lv_event_t * e) {
         create_mqtt_screen();
     } else if (action == SETTINGS_ACTION_WEB_PORTAL) {
         create_web_portal_screen();
+    } else if (action == SETTINGS_ACTION_MICROPHONE) {
+        create_todo_screen("Mikrofon");
+    } else if (action == SETTINGS_ACTION_ASSIST) {
+        create_assist_screen();
+    } else if (action == SETTINGS_ACTION_SENDSPIN) {
+        create_todo_screen("Sendspin");
     }
 }
 
@@ -1652,7 +2188,7 @@ static lv_obj_t * create_subscreen_base(const char * title, lv_event_cb_t back_c
     lv_obj_t * heading = lv_label_create(header_bar);
     lv_label_set_text(heading, title);
     lv_obj_set_pos(heading, 76, 22);
-    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24_pl, LV_PART_MAIN);
     lv_obj_set_style_text_color(heading, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
 
     if (list_out) *list_out = list;
@@ -2228,6 +2764,573 @@ static void create_display_screen(void) {
     lv_obj_set_style_border_width(spacer, 0, LV_PART_MAIN);
 }
 
+static void sound_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_sound_screen();
+}
+
+static void apply_dac_gain(int gain) {
+    if (gain < 0) gain = 0;
+    if (gain > 3) gain = 3;
+    sound_dac_gain = gain;
+    save_int_file("/tuya/data/ha_dac_gain", gain);
+#ifndef PC_SIMULATOR
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+             "amixer -q -c 0 cset numid=34 %d 2>/dev/null; "
+             "amixer -q -c 0 cset numid=35 %d 2>/dev/null",
+             gain, gain);
+    system(cmd);
+#endif
+}
+
+static void sound_gain_button_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int gain = (int)(long)lv_event_get_user_data(e);
+    apply_dac_gain(gain);
+    for (int i = 0; i < 4; ++i) {
+        if (!sound_gain_buttons[i]) continue;
+        bool selected = (i == gain);
+        settings_m3_surface(sound_gain_buttons[i],
+                            selected ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
+        lv_obj_set_style_border_width(sound_gain_buttons[i], selected ? 0 : 1, LV_PART_MAIN);
+    }
+}
+
+static void apply_hardware_volume(int percent) {
+    sound_volume_percent = percent;
+    save_int_file("/tuya/data/ha_sound_volume", percent);
+    bool quiet = sound_quiet_enabled;
+    int gain = sound_dac_gain;
+    std::thread([percent, quiet, gain]() {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "amixer -q -c 0 sset Speaker %d%% 2>/dev/null; "
+                 "amixer -q -c 0 cset numid=43 %s 2>/dev/null; "
+                 "amixer -q -c 0 cset numid=34 %d 2>/dev/null; "
+                 "amixer -q -c 0 cset numid=35 %d 2>/dev/null",
+                 percent, quiet ? "off" : "on", gain, gain);
+        system(cmd);
+    }).detach();
+}
+
+static void sound_volume_event_cb(lv_event_t * e) {
+    lv_obj_t * slider = lv_event_get_target(e);
+    int percent = lv_slider_get_value(slider);
+    set_percent_label(sound_volume_label, percent);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        apply_hardware_volume(percent);
+    }
+}
+
+static void sound_toggle_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    bool enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    int setting = (int)(long)lv_event_get_user_data(e);
+    if (setting == 0) {
+        sound_quiet_enabled = enabled;
+        save_int_file("/tuya/data/ha_sound_quiet", enabled ? 1 : 0);
+        apply_hardware_volume(sound_volume_percent);
+    } else if (setting == 1) {
+        sound_alarms_enabled = enabled;
+        save_int_file("/tuya/data/ha_sound_alarms", enabled ? 1 : 0);
+    } else if (setting == 2) {
+        sound_ha_notifications_enabled = enabled;
+        save_int_file("/tuya/data/ha_sound_notifications", enabled ? 1 : 0);
+    } else if (setting == 3) {
+        sound_touch_enabled = enabled;
+        save_int_file("/tuya/data/ha_sound_touch", enabled ? 1 : 0);
+    }
+}
+
+static lv_obj_t * create_sound_switch_card(lv_obj_t * list, int y, const char * title,
+                                           bool enabled, int setting) {
+    lv_obj_t * card = settings_m3_card(list, 20, y, 440, 70);
+    settings_m3_label(card, title, 16, 23, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    lv_obj_t * sw = lv_switch_create(card);
+    settings_m3_style_switch(sw);
+    lv_obj_set_pos(sw, 374, 21);
+    if (enabled) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, sound_toggle_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(long)setting);
+    return card;
+}
+
+static void create_sound_screen(void) {
+    if (sound_screen) return;
+
+    sound_volume_percent = read_int_file("/tuya/data/ha_sound_volume", 75);
+    sound_dac_gain = read_int_file("/tuya/data/ha_dac_gain", 2);
+    if (sound_dac_gain < 0 || sound_dac_gain > 3) sound_dac_gain = 2;
+    sound_quiet_enabled = read_int_file("/tuya/data/ha_sound_quiet", 0) != 0;
+    sound_alarms_enabled = read_int_file("/tuya/data/ha_sound_alarms", 1) != 0;
+    sound_ha_notifications_enabled = read_int_file("/tuya/data/ha_sound_notifications", 1) != 0;
+    sound_touch_enabled = read_int_file("/tuya/data/ha_sound_touch", 1) != 0;
+
+    lv_obj_t * list = NULL;
+    sound_screen = create_subscreen_base("Dźwięki", sound_back_event_cb, &list);
+
+    lv_obj_t * volume_card = settings_m3_card(list, 20, 8, 440, 116);
+    settings_m3_label(volume_card, "Głośność", 16, 12, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    char volume_text[16];
+    snprintf(volume_text, sizeof(volume_text), "%d%%", sound_volume_percent);
+    sound_volume_label = settings_m3_label(volume_card, volume_text, 0, 12, M3_PRIMARY,
+                                            &lv_font_montserrat_20_pl);
+    lv_obj_align(sound_volume_label, LV_ALIGN_TOP_RIGHT, -16, 12);
+    sound_volume_slider = lv_slider_create(volume_card);
+    lv_obj_set_size(sound_volume_slider, 408, 20);
+    lv_obj_set_pos(sound_volume_slider, 16, 68);
+    lv_slider_set_range(sound_volume_slider, 0, 100);
+    lv_slider_set_value(sound_volume_slider, sound_volume_percent, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(sound_volume_slider, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sound_volume_slider, M3_PRIMARY, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sound_volume_slider, M3_ON_PRIMARY_CONTAINER, LV_PART_KNOB);
+    lv_obj_add_event_cb(sound_volume_slider, sound_volume_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sound_volume_slider, sound_volume_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(sound_volume_slider, sound_volume_event_cb, LV_EVENT_PRESS_LOST, NULL);
+
+    lv_obj_t * gain_card = settings_m3_card(list, 20, 136, 440, 132);
+    settings_m3_label(gain_card, "Wzmocnienie DAC", 16, 14, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    settings_m3_label(gain_card, "Poziom wzmacniacza sygnału audio", 16, 44, M3_ON_SURFACE_VARIANT,
+                      &lv_font_montserrat_14_pl);
+
+    for (int i = 0; i < 4; ++i) {
+        bool selected = (i == sound_dac_gain);
+        sound_gain_buttons[i] = lv_btn_create(gain_card);
+        lv_obj_set_size(sound_gain_buttons[i], 94, 40);
+        lv_obj_set_pos(sound_gain_buttons[i], 16 + i * 102, 78);
+        settings_m3_surface(sound_gain_buttons[i],
+                            selected ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
+        lv_obj_set_style_border_color(sound_gain_buttons[i], M3_OUTLINE_VARIANT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(sound_gain_buttons[i], selected ? 0 : 1, LV_PART_MAIN);
+        lv_obj_add_event_cb(sound_gain_buttons[i], sound_gain_button_cb, LV_EVENT_CLICKED, (void *)(long)i);
+
+        const char * lbl_text = i == 0 ? "Poz. 1" : (i == 1 ? "Poz. 2" : (i == 2 ? "Poz. 3" : "Poz. 4"));
+        lv_obj_t * btn_lbl = settings_m3_label(
+            sound_gain_buttons[i], lbl_text, 0, 0,
+            selected ? M3_ON_PRIMARY_CONTAINER : M3_ON_SURFACE,
+            &lv_font_montserrat_12_pl);
+        lv_obj_center(btn_lbl);
+    }
+
+    create_sound_switch_card(list, 280, "Tryb cichy", sound_quiet_enabled, 0);
+    create_sound_switch_card(list, 362, "Alarmy", sound_alarms_enabled, 1);
+    create_sound_switch_card(list, 444, "Powiadomienia Home Assistant",
+                             sound_ha_notifications_enabled, 2);
+    create_sound_switch_card(list, 526, "Dźwięki dotyku", sound_touch_enabled, 3);
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, 608);
+    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
+}
+
+static void todo_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_todo_screen();
+}
+
+static void assist_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_assist_screen();
+}
+
+static void reset_assist_conversation(void) {
+    assist_conversation_id.clear();
+    assist_conversation_expires_at = 0;
+    assist_history.clear();
+}
+
+static std::string assist_history_text(const std::string& pending_transcript = "",
+                                       const std::string& pending_response = "") {
+    std::string text;
+    for (size_t i = 0; i < assist_history.size(); ++i) {
+        if (!text.empty()) text += "\n\n";
+        text += "Ty: " + assist_history[i].transcript +
+                "\nHA: " + assist_history[i].response;
+    }
+    if (!pending_transcript.empty()) {
+        if (!text.empty()) text += "\n\n";
+        text += "Ty: " + pending_transcript;
+        if (!pending_response.empty()) text += "\nHA: " + pending_response;
+    }
+    return text;
+}
+
+static void begin_wake_command_capture(void);
+
+static void start_assist_pipeline(void) {
+    const uint32_t now = custom_tick_get();
+    if (assist_conversation_expires_at &&
+        static_cast<int32_t>(now - assist_conversation_expires_at) >= 0) {
+        reset_assist_conversation();
+    }
+    assist_pipeline_running = true;
+    assist_overlay_set_state(ASSIST_OVERLAY_PROCESSING, "Przetwarzam...");
+    assist_overlay_set_text("Rozpoznaję polecenie...");
+    if (assist_status_label) lv_label_set_text(assist_status_label, "Przetwarzanie...");
+    if (assist_ptt_button) lv_obj_add_state(assist_ptt_button, LV_STATE_DISABLED);
+    if (assist_new_conversation_button) {
+        lv_obj_add_state(assist_new_conversation_button, LV_STATE_DISABLED);
+    }
+    const uint32_t generation = assist_pipeline_generation;
+    const std::string conversation_id = assist_conversation_id;
+    std::shared_ptr<std::vector<int16_t> > samples(new std::vector<int16_t>());
+    samples->swap(assist_pcm_samples);
+    std::thread([samples, generation, conversation_id]() {
+        AssistPipelineResult result = run_assist_pipeline_process(*samples, conversation_id,
+            [generation](const AssistPipelineResult& progress) {
+                std::lock_guard<std::mutex> lock(assist_pipeline_result_mutex);
+                assist_pipeline_pending_results.push_back(
+                    new AssistPipelineUiResult{generation, progress, false});
+            },
+            [generation]() {
+                return generation != assist_pipeline_generation.load();
+            });
+        assist_pipeline_running = false;
+        std::lock_guard<std::mutex> lock(assist_pipeline_result_mutex);
+        assist_pipeline_pending_results.push_back(
+            new AssistPipelineUiResult{generation, result, true});
+    }).detach();
+}
+
+static void apply_assist_pipeline_result(AssistPipelineUiResult * data) {
+    if (!data) return;
+    if (data->generation == assist_pipeline_generation.load()) {
+        if (!data->result.conversation_id.empty()) {
+            assist_conversation_id = data->result.conversation_id;
+        }
+        if (data->result.stage == "tts_level") {
+            assist_overlay_tts_level = std::max(0, std::min(100, data->result.audio_level));
+        } else if (data->result.stage == "transcript") {
+            if (assist_status_label) lv_label_set_text(assist_status_label, "Rozpoznano polecenie");
+            if (assist_result_label) {
+                const std::string text = assist_history_text(data->result.transcript);
+                lv_label_set_text(assist_result_label, text.c_str());
+            }
+            assist_overlay_show_transcript(data->result.transcript);
+        } else if (data->result.stage == "playback" && !data->final_result) {
+            if (assist_status_label) lv_label_set_text(assist_status_label, "Odtwarzanie odpowiedzi...");
+            if (assist_result_label) {
+                const std::string text = assist_history_text(
+                    data->result.transcript, assist_markdown_plain_text(data->result.response));
+                lv_label_set_text(assist_result_label, text.c_str());
+            }
+            assist_overlay_show_response(data->result.transcript, data->result.response);
+        } else if (data->result.success) {
+            const std::string plain_response = assist_markdown_plain_text(data->result.response);
+            bool conversational = false;
+            if (data->final_result && !data->result.transcript.empty()) {
+                assist_history.push_back(AssistHistoryEntry{data->result.transcript, plain_response});
+                while (assist_history.size() > 6) assist_history.pop_front();
+                conversational = data->result.continue_conversation ||
+                    data->result.response_type == "query_answer" ||
+                    (!plain_response.empty() && plain_response.back() == '?');
+                assist_conversation_expires_at = custom_tick_get() +
+                    (conversational ? 45000 : 15000);
+                printf("[Assist] response_type=%s continue=%d context_timeout=%ds\n",
+                       data->result.response_type.c_str(), data->result.continue_conversation,
+                       conversational ? 45 : 15);
+            }
+            if (assist_status_label) {
+                lv_label_set_text(assist_status_label, data->result.error.empty()
+                    ? "Polecenie wykonane" : "Polecenie wykonane, brak dźwięku");
+            }
+            if (assist_result_label) {
+                const std::string text = assist_history_text();
+                lv_label_set_text(assist_result_label, text.c_str());
+            }
+            if (!assist_overlay_response_started_at) {
+                assist_overlay_show_response(data->result.transcript, data->result.response);
+            }
+            assist_overlay_reveal_markdown(
+                assist_overlay_utf8_character_count(assist_overlay_response_text));
+
+            const bool ask_followup = data->result.continue_conversation ||
+                (!plain_response.empty() && plain_response.back() == '?');
+
+            if (data->final_result && ask_followup) {
+                printf("[Assist] Auto-continuing conversation (question/follow-up). Opening mic...\n");
+                begin_wake_command_capture();
+            } else {
+                assist_overlay_set_state(ASSIST_OVERLAY_DONE, "GOTOWE");
+                assist_overlay_animation_frozen = true;
+                assist_overlay_tts_level = 0;
+                assist_overlay_hide_at = custom_tick_get() + 10000;
+            }
+        } else {
+            if (assist_status_label) lv_label_set_text(assist_status_label, "Błąd Assist");
+            if (assist_result_label) lv_label_set_text(assist_result_label, data->result.error.c_str());
+            show_assist_overlay(ASSIST_OVERLAY_ERROR, "Nie udało się",
+                                data->result.error.empty() ? "Nieznany błąd Assist" : data->result.error);
+            if (data->final_result) assist_overlay_hide_at = custom_tick_get() + 10000;
+        }
+        if (data->final_result && assist_ptt_button) {
+            lv_obj_clear_state(assist_ptt_button, LV_STATE_DISABLED);
+        }
+        if (data->final_result && assist_new_conversation_button) {
+            lv_obj_clear_state(assist_new_conversation_button, LV_STATE_DISABLED);
+        }
+    } else if (assist_screen && !assist_pipeline_running) {
+        if (assist_status_label) lv_label_set_text(assist_status_label, "Gotowy");
+        if (assist_ptt_button) lv_obj_clear_state(assist_ptt_button, LV_STATE_DISABLED);
+        if (assist_new_conversation_button) {
+            lv_obj_clear_state(assist_new_conversation_button, LV_STATE_DISABLED);
+        }
+    }
+    delete data;
+}
+
+static void apply_next_assist_pipeline_result(void) {
+    AssistPipelineUiResult * result = NULL;
+    {
+        std::lock_guard<std::mutex> lock(assist_pipeline_result_mutex);
+        if (!assist_pipeline_pending_results.empty()) {
+            result = assist_pipeline_pending_results.front();
+            assist_pipeline_pending_results.pop_front();
+        }
+    }
+    if (result) apply_assist_pipeline_result(result);
+}
+
+static bool start_wake_word_listener(void) {
+    static const char * worker = "/tuya/data/mww_worker";
+    static const char * model = "/tuya/data/okay_nabu_v2.tflite";
+    if (ha_url.empty() || ha_token.empty() || access(worker, X_OK) != 0 ||
+        access(model, R_OK) != 0) return false;
+    const bool started = g_wake_word_listener.start(worker, model, []() {
+        assist_wake_pending = true;
+    });
+    if (started) printf("[WakeWord] Listening for Okay Nabu.\n");
+    else printf("[WakeWord] Start failed: %s\n", g_wake_word_listener.last_error().c_str());
+    return started;
+}
+
+static void begin_wake_command_capture(void) {
+    ++assist_pipeline_generation;
+    assist_pcm_samples.clear();
+    assist_wake_capture_active = true;
+    assist_wake_speech_detected = false;
+    assist_wake_capture_started_at = custom_tick_get();
+    assist_wake_last_voice_at = assist_wake_capture_started_at;
+    show_assist_overlay(ASSIST_OVERLAY_LISTENING, "SŁUCHAM", "Powiedz, czego potrzebujesz.");
+    if (assist_status_label) lv_label_set_text(assist_status_label, "Wykryto: Okay Nabu");
+    if (assist_result_label) lv_label_set_text(assist_result_label, "Słucham polecenia...");
+
+    if (!g_assist_audio.start([](const int16_t * samples, size_t count) {
+            const size_t max_samples = 16000 * 10;
+            if (assist_pcm_samples.size() + count <= max_samples) {
+                assist_pcm_samples.insert(assist_pcm_samples.end(), samples, samples + count);
+            }
+            int peak = 0;
+            for (size_t i = 0; i < count; ++i) {
+                const int sample = samples[i];
+                const int magnitude = sample < 0 ? -sample : sample;
+                if (magnitude > peak) peak = magnitude;
+            }
+            if (peak >= 900) {
+                assist_wake_speech_detected = true;
+                assist_wake_last_voice_at = custom_tick_get();
+            }
+        })) {
+        assist_wake_capture_active = false;
+        assist_overlay_set_state(ASSIST_OVERLAY_ERROR, "BŁĄD MIKROFONU");
+        assist_overlay_set_text("Nie można rozpocząć nagrywania po wake word.");
+        assist_overlay_hide_at = custom_tick_get() + 10000;
+        assist_wake_restart_after = custom_tick_get() + 3000;
+    }
+}
+
+static void finish_wake_command_capture(bool submit) {
+    assist_wake_capture_active = false;
+    g_assist_audio.stop();
+    if (submit && assist_pcm_samples.size() >= 3200) {
+        start_assist_pipeline();
+        return;
+    }
+    assist_pcm_samples.clear();
+    assist_overlay_set_state(ASSIST_OVERLAY_ERROR, "NIE USŁYSZAŁEM");
+    assist_overlay_set_text("Powiedz Okay Nabu i spróbuj ponownie.");
+    assist_overlay_hide_at = custom_tick_get() + 10000;
+    assist_wake_restart_after = custom_tick_get() + 2500;
+}
+
+static void assist_runtime_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    apply_next_assist_pipeline_result();
+    const uint32_t now = custom_tick_get();
+
+    if (assist_wake_pending && !assist_pipeline_running && !assist_wake_capture_active &&
+        !g_assist_audio.is_running()) {
+        assist_wake_pending = false;
+        g_wake_word_listener.stop();
+        begin_wake_command_capture();
+        return;
+    }
+
+    if (assist_wake_capture_active) {
+        const uint32_t elapsed = now - assist_wake_capture_started_at;
+        const bool speech = assist_wake_speech_detected.load();
+        const uint32_t silence = now - assist_wake_last_voice_at.load();
+        if ((speech && elapsed >= 1200 && silence >= 1100) || elapsed >= 10000) {
+            finish_wake_command_capture(speech);
+        } else if (!speech && elapsed >= 5000) {
+            finish_wake_command_capture(false);
+        }
+        return;
+    }
+
+    if (!assist_pipeline_running && !g_assist_audio.is_running() &&
+        !g_wake_word_listener.is_running() &&
+        static_cast<int32_t>(now - assist_wake_restart_after) >= 0) {
+        if (!start_wake_word_listener()) assist_wake_restart_after = now + 5000;
+    }
+}
+
+static void assist_ptt_event_cb(lv_event_t * e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        if (assist_pipeline_running) return;
+        g_wake_word_listener.stop();
+        assist_wake_restart_after = custom_tick_get() + 1000;
+        ++assist_pipeline_generation;
+        assist_pcm_samples.clear();
+        show_assist_overlay(ASSIST_OVERLAY_LISTENING, "Słucham...", "Mów, trzymając przycisk.");
+        if (assist_result_label) lv_label_set_text(assist_result_label, "Słucham...");
+        if (g_assist_audio.start([](const int16_t * samples, size_t count) {
+                const size_t max_samples = 16000 * 15;
+                if (assist_pcm_samples.size() + count <= max_samples) {
+                    assist_pcm_samples.insert(assist_pcm_samples.end(), samples, samples + count);
+                }
+            })) {
+            if (assist_status_label) lv_label_set_text(assist_status_label, "Mikrofon aktywny");
+        } else if (assist_status_label) {
+            lv_label_set_text(assist_status_label, "Błąd mikrofonu");
+            assist_overlay_set_state(ASSIST_OVERLAY_ERROR, "Błąd mikrofonu");
+            assist_overlay_set_text("Nie można rozpocząć nagrywania.");
+            assist_overlay_hide_at = custom_tick_get() + 10000;
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        g_assist_audio.stop();
+        if (assist_level_bar) lv_bar_set_value(assist_level_bar, 0, LV_ANIM_OFF);
+        if (assist_level_label) lv_label_set_text(assist_level_label, "0%");
+        if (assist_pcm_samples.size() < 3200) {
+            if (assist_status_label) lv_label_set_text(assist_status_label, "Nagranie za krótkie");
+            assist_overlay_set_state(ASSIST_OVERLAY_ERROR, "Nagranie za krótkie");
+            assist_overlay_set_text("Przytrzymaj przycisk nieco dłużej.");
+            assist_overlay_hide_at = custom_tick_get() + 10000;
+            return;
+        }
+
+        start_assist_pipeline();
+    }
+}
+
+static void assist_new_conversation_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED || assist_pipeline_running) return;
+    reset_assist_conversation();
+    if (assist_status_label) lv_label_set_text(assist_status_label, "Nowa rozmowa");
+    if (assist_result_label) {
+        lv_label_set_text(assist_result_label, "Przytrzymaj przycisk i rozpocznij nową rozmowę.");
+    }
+}
+
+static void assist_level_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (!assist_screen) return;
+
+    apply_next_assist_pipeline_result();
+
+    const int level = g_assist_audio.level_percent();
+    if (assist_level_bar) lv_bar_set_value(assist_level_bar, level, LV_ANIM_ON);
+    if (assist_level_label) set_percent_label(assist_level_label, level);
+
+    if (!g_assist_audio.is_running()) {
+        const std::string error = g_assist_audio.last_error();
+        if (!error.empty() && assist_status_label) lv_label_set_text(assist_status_label, "Błąd mikrofonu");
+    }
+}
+
+static void create_assist_screen(void) {
+    if (assist_screen) return;
+
+    lv_obj_t * list = NULL;
+    assist_screen = create_subscreen_base("Assist", assist_back_event_cb, &list);
+    settings_m3_hero(list, "Push-to-talk", "16 kHz • mono • bez zapisu", ICON_MIC, true);
+
+    lv_obj_t * capture_card = settings_m3_card(list, 20, 96, 440, 180);
+    settings_m3_label(capture_card, "Test mikrofonu", 16, 14, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    assist_status_label = settings_m3_label(capture_card, "Gotowy", 16, 48,
+                                             M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    assist_level_label = settings_m3_label(capture_card, "0%", 0, 48, M3_PRIMARY,
+                                            &lv_font_montserrat_14_pl);
+    lv_obj_align(assist_level_label, LV_ALIGN_TOP_RIGHT, -16, 48);
+
+    assist_level_bar = lv_bar_create(capture_card);
+    lv_obj_set_size(assist_level_bar, 408, 12);
+    lv_obj_set_pos(assist_level_bar, 16, 78);
+    lv_bar_set_range(assist_level_bar, 0, 100);
+    lv_bar_set_value(assist_level_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(assist_level_bar, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(assist_level_bar, M3_PRIMARY, LV_PART_INDICATOR);
+
+    assist_ptt_button = lv_btn_create(capture_card);
+    lv_obj_set_size(assist_ptt_button, 408, 56);
+    lv_obj_set_pos(assist_ptt_button, 16, 108);
+    settings_m3_surface(assist_ptt_button, M3_PRIMARY, 28);
+    lv_obj_set_style_bg_color(assist_ptt_button, lv_color_hex(0x3DC3D1), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(assist_ptt_button, assist_ptt_event_cb, LV_EVENT_ALL, NULL);
+    if (assist_pipeline_running) lv_obj_add_state(assist_ptt_button, LV_STATE_DISABLED);
+    lv_obj_t * ptt_label = settings_m3_label(assist_ptt_button, "Przytrzymaj i mów", 0, 0, M3_ON_PRIMARY,
+                                             &lv_font_montserrat_16_pl);
+    lv_obj_center(ptt_label);
+
+    lv_obj_t * info_card = settings_m3_card(list, 20, 288, 440, 180);
+    settings_m3_label(info_card, "Assist", 16, 14, M3_ON_SURFACE,
+                      &lv_font_montserrat_20_pl);
+    assist_new_conversation_button = lv_btn_create(info_card);
+    lv_obj_set_size(assist_new_conversation_button, 136, 34);
+    lv_obj_set_pos(assist_new_conversation_button, 288, 7);
+    settings_m3_surface(assist_new_conversation_button, M3_PRIMARY_CONTAINER, 17);
+    lv_obj_add_event_cb(assist_new_conversation_button, assist_new_conversation_event_cb,
+                        LV_EVENT_CLICKED, NULL);
+    if (assist_pipeline_running) {
+        lv_obj_add_state(assist_new_conversation_button, LV_STATE_DISABLED);
+    }
+    lv_obj_t * new_conversation_label = settings_m3_label(
+        assist_new_conversation_button, "Nowa rozmowa", 0, 0, M3_ON_PRIMARY_CONTAINER,
+        &lv_font_montserrat_12_pl);
+    lv_obj_center(new_conversation_label);
+    lv_obj_t * result_scroll = lv_obj_create(info_card);
+    lv_obj_set_size(result_scroll, 408, 116);
+    lv_obj_set_pos(result_scroll, 16, 48);
+    lv_obj_set_style_bg_opa(result_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(result_scroll, 0, 0);
+    lv_obj_set_style_pad_all(result_scroll, 0, 0);
+    lv_obj_set_scroll_dir(result_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(result_scroll, LV_SCROLLBAR_MODE_AUTO);
+    const std::string current_history = assist_history_text();
+    const char * initial_result = assist_pipeline_running ? "Przetwarzanie..." :
+        (current_history.empty() ? "Przytrzymaj przycisk i wypowiedz polecenie."
+                                 : current_history.c_str());
+    assist_result_label = settings_m3_label(result_scroll, initial_result,
+                                             0, 0, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_set_width(assist_result_label, 392);
+    lv_label_set_long_mode(assist_result_label, LV_LABEL_LONG_WRAP);
+
+    assist_level_timer = lv_timer_create(assist_level_timer_cb, 100, NULL);
+}
+
+static void create_todo_screen(const char * title) {
+    if (todo_screen) return;
+    lv_obj_t * list = NULL;
+    todo_screen = create_subscreen_base(title, todo_back_event_cb, &list);
+    lv_obj_t * card = settings_m3_card(list, 20, 24, 440, 132);
+    lv_obj_t * todo = settings_m3_label(card, "TODO", 0, 0, M3_PRIMARY,
+                                        &lv_font_montserrat_24_pl);
+    lv_obj_center(todo);
+}
+
 static std::string exec_cmd_line(const char * cmd) {
     FILE * pipe = popen(cmd, "r");
     if (!pipe) return "";
@@ -2529,10 +3632,13 @@ static void wifi_connect_action_cb(lv_event_t * e) {
 
         if (!pass.empty()) {
             snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d psk '\"%s\"'", net_id, pass.c_str());
+            system(cmd);
+            snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d key_mgmt WPA-PSK", net_id);
+            system(cmd);
         } else {
             snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 set_network %d key_mgmt NONE", net_id);
+            system(cmd);
         }
-        system(cmd);
 
         snprintf(cmd, sizeof(cmd), "wpa_cli -p /var/run/wpa_supplicant -i wlan0 enable_network %d", net_id);
         system(cmd);
@@ -3168,7 +4274,7 @@ static void create_settings_screen(void) {
     lv_obj_t * heading = lv_label_create(header_bar);
     lv_label_set_text(heading, "Ustawienia");
     lv_obj_set_pos(heading, 76, 22);
-    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24_pl, LV_PART_MAIN);
     lv_obj_set_style_text_color(heading, lv_color_make(0xE4, 0xE2, 0xE9), LV_PART_MAIN);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
@@ -3189,13 +4295,19 @@ static void create_settings_screen(void) {
     add_settings_card(list, &y, ICON_BRIGHTNESS, lv_color_make(0x9A, 0x56, 0x00),
                       "Ekran", "Jasność i wygaszanie", SETTINGS_ACTION_DISPLAY);
     add_settings_card(list, &y, ICON_VOLUME, lv_color_make(0x7A, 0x48, 0x92),
-                      "Dźwięk", "Głośność i mikrofon", SETTINGS_ACTION_CONTROLS);
+                      "Dźwięki", "Głośność i powiadomienia", SETTINGS_ACTION_CONTROLS);
+    add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
+                      "Mikrofon", "TODO", SETTINGS_ACTION_MICROPHONE);
+    add_settings_card(list, &y, ICON_TOOLS, lv_color_make(0x4B, 0x63, 0x73),
+                      "Sendspin", "TODO", SETTINGS_ACTION_SENDSPIN);
     add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),
                       "Wygląd", "Motyw i ekran główny - planowane", SETTINGS_ACTION_NONE);
 
     add_settings_section(list, "HOME ASSISTANT", &y);
     add_settings_card(list, &y, ICON_HOME, lv_color_make(0x03, 0x78, 0xA6),
                       "Połączenie", ha_status.c_str(), SETTINGS_ACTION_NONE);
+    add_settings_card(list, &y, ICON_MIC, lv_color_make(0x18, 0x65, 0xA8),
+                      "Assist", "Asystent głosowy", SETTINGS_ACTION_ASSIST);
 
     bool httpd_active = is_process_running("httpd");
     std::string web_status = httpd_active ? (g_web_autostart ? "Włączony (Autostart)" : "Włączony (Ręcznie)") : "Wyłączony";
@@ -3205,9 +4317,6 @@ static void create_settings_screen(void) {
     std::string mqtt_status = g_mqtt_config.enabled ? (g_mqtt_client.is_connected() ? "Połączono (" + g_mqtt_config.host + ")" : "Włączono (" + g_mqtt_config.host + ")") : "Wyłączony";
     add_settings_card(list, &y, ICON_PLUG, lv_color_make(0x00, 0x89, 0x7B),
                       "MQTT", mqtt_status.c_str(), SETTINGS_ACTION_MQTT);
-
-    add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
-                      "Asystent głosowy", "HA Assist / Wyoming - planowane", SETTINGS_ACTION_NONE);
 
     add_settings_section(list, "SYSTEM", &y);
     add_settings_card(list, &y, ICON_DOWNLOAD, lv_color_make(0x38, 0x6A, 0x20),
@@ -3260,10 +4369,13 @@ static void apply_volume(int percent) {
     if (percent == 0) {
         system("amixer -q -c 0 cset numid=43 off");
     } else {
-        // The OEM app also keeps DAC gain fixed and applies 0-100% in software playback.
-        system("amixer -q -c 0 cset numid=43 on; "
-               "amixer -q -c 0 cset numid=34 2; "
-               "amixer -q -c 0 cset numid=35 2");
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd),
+                 "amixer -q -c 0 cset numid=43 on; "
+                 "amixer -q -c 0 cset numid=34 %d; "
+                 "amixer -q -c 0 cset numid=35 %d",
+                 sound_dac_gain, sound_dac_gain);
+        system(cmd);
     }
 #else
     (void)percent;
@@ -3396,6 +4508,9 @@ static void create_control_center(lv_obj_t * scr) {
     hal_set_backlight(brightness * backlight_max / 100);
     brightness_slider = create_control_slider(control_center, ICON_BRIGHTNESS, 88, 5, brightness,
                                                brightness_event_cb, &brightness_value_label);
+
+    sound_dac_gain = read_int_file("/tuya/data/ha_dac_gain", 2);
+    if (sound_dac_gain < 0 || sound_dac_gain > 3) sound_dac_gain = 2;
 
     int volume = read_int_file("/tuya/data/ha_volume", 80);
     if (volume < 0 || volume > 100) volume = 80;
@@ -3589,6 +4704,12 @@ static void mqtt_telemetry_timer_cb(lv_timer_t * timer) {
 }
 
 int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
+    if (argc >= 2 && std::string(argv[1]) == "--assist-pipeline") {
+        g_cgi_mode = true;
+        if (!load_configuration()) return 2;
+        return assist_pipeline_child_main(ha_url, ha_token, argc >= 3 ? argv[2] : "");
+    }
     if (argc == 2 && (std::string(argv[1]) == "--cgi-config" || std::string(argv[1]) == "--cgi-status")) {
         g_cgi_mode = true;
         return std::string(argv[1]) == "--cgi-config" ? cgi_config_main() : cgi_status_main();
@@ -3608,7 +4729,6 @@ int main(int argc, char **argv) {
     
     // 1. Initialize LVGL engine
     lv_init();
-    hal_fonts_init();
 
     // 2. Initialize display and touch drivers
     if (!hal_display_init()) {
@@ -3679,6 +4799,8 @@ int main(int argc, char **argv) {
     lv_disp_trig_activity(NULL);
     lv_timer_create(screensaver_timer_cb, 500, NULL);
     lv_timer_create(auto_brightness_timer_cb, 500, NULL);
+    assist_wake_restart_after = custom_tick_get() + 1000;
+    lv_timer_create(assist_runtime_timer_cb, 100, NULL);
     printf("[ScreenSaver] Screen blanker initialized. Timeout: %u seconds.\n", saved_timeout);
 
     // Initialize MQTT Client if configured

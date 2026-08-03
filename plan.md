@@ -27,6 +27,7 @@ Niniejszy dokument opisuje architekturę systemu, obecny stan oraz szczegółowy
 ## 📋 Plan Działań i Zadania (Checklist)
 
 ### Faza 1: Rozbudowa Interfejsu Polskiego i Siatki Encji (v1.8.0)
+- [ ] Dalsza optymalizacja i dopracowanie podmenu Wi-Fi (poprawa obsługi list sieci, zarządzania zapisanymi profilami i ponownego łączenia).
 - [ ] Stworzyć widok siatki kafelków (Grid layout) na ekranie głównym.
 - [ ] Dodać wsparcie dla ikonek MDI (Material Design Icons) dla różnych typów urządzeń.
 - [ ] Umożliwić dodawanie dowolnej liczby przycisków za pośrednictwem portalu WWW.
@@ -38,9 +39,28 @@ Niniejszy dokument opisuje architekturę systemu, obecny stan oraz szczegółowy
 - [ ] Dodać sterowanie opcjonalnymi automatyzacjami i scenami (`scene.turn_on`).
 
 ### Faza 3: Dźwięk, Mikrofon i Asystent Głosowy (v2.2.0)
-- [ ] Skonfigurować sterowniki ALSA dla wbudowanego mikrofonu i głośnika.
-- [ ] Wdrożyć klienta Wyoming Satellite dla Home Assistant Assist.
-- [ ] Umożliwić lokalne detekcje słowa wybudzającego (OpenWakeWord).
+- [x] Zweryfikować formaty ALSA wbudowanego mikrofonu i głośnika; sprzęt przechwytuje 16 kHz stereo, a Assist użyje pierwszego kanału jako mono. Wyniki: `docs/home-assistant-lvgl-app/oem-audio-reuse.md`.
+- [ ] Zmierzyć jakość mikrofonu, opóźnienie, poziom szumu oraz wpływ odtwarzania przez głośnik na nagranie.
+- [ ] Wdrożyć lekkiego, natywnego satelitę Home Assistant Assist korzystającego z aktualnego protokołu ESPHome Voice Assistant; nie opierać nowej implementacji na zarchiwizowanym `wyoming-satellite`.
+- [ ] Najpierw uruchomić tryb push-to-talk, przesyłanie głosu do HA oraz odtwarzanie odpowiedzi TTS.
+- [ ] Dodać zdalne wykrywanie słowa wybudzającego przez Home Assistant, bez stałego lokalnego obciążenia panelu modelem AI.
+- [ ] Ocenić i wdrożyć AGC, redukcję szumu oraz eliminację echa akustycznego przed włączeniem nasłuchu podczas odpowiedzi głośnika.
+- [ ] Dopiero po benchmarkach rozważyć lokalne microWakeWord/OpenWakeWord; gotowy Linux Voice Assistant przekracza dostępne zasoby panelu.
+- [ ] Dodać obsługę stanów rozmowy, timerów, kontynuacji konwersacji i błędów w interfejsie LVGL.
+- [ ] Zaimplementować funkcje podmenu Mikrofon (obecnie ekran TODO).
+- [ ] Zastąpić ekran TODO Asystenta ustawieniami prywatności mikrofonu, trybu aktywacji, głośności odpowiedzi i wybranego pipeline Assist.
+
+### Faza 4: Sendspin - muzyka, ekran i multi-room (v2.4.0)
+- [x] Poprawić nazwę podmenu z `Senspin` na `Sendspin`.
+- [ ] Zintegrować `sendspin-cpp` i CMake z obecnym statycznym buildem AArch64; podnieść standard wybranych modułów do C++20.
+- [ ] Najpierw wdrożyć role `controller`, `metadata` i `artwork`: stan odtwarzania, tytuł, wykonawca, okładka, postęp i przyciski transportu.
+- [ ] Dodać ekran Now Playing oraz sterowanie play/pause, poprzedni/następny, głośność i wyciszenie w LVGL.
+- [ ] Zaimplementować mDNS `_sendspin._tcp`, serwer WebSocket na porcie 8928 oraz trwały identyfikator klienta.
+- [ ] Dodać rolę `player` w minimalnym wariancie PCM 48 kHz, 16-bit, mono z ograniczonym buforem dostosowanym do pamięci panelu.
+- [ ] Napisać wyjście ALSA raportujące rzeczywisty moment odtworzenia próbek przez `notify_audio_played()` i skalibrować stałe opóźnienie sprzętu.
+- [ ] Po stabilizacji PCM ocenić koszt FLAC i Opus; nie dodawać kodeków, jeśli binarka przekroczy bezpieczny budżet partycji `/tuya/data`.
+- [ ] Przetestować synchronizację multi-room, dryf zegara, underruny, utratę Wi-Fi, ponowne połączenie i współdzielenie głośnika z Assist.
+- [ ] Zachować możliwość wyłączenia Sendspin i powrotu do poprzedniej binarki, ponieważ protokół jest nadal w public preview.
 
 ---
 
