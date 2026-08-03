@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.0";
+const char * CURRENT_VERSION = "v1.9.1";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -3045,18 +3045,10 @@ static void apply_assist_pipeline_result(AssistPipelineUiResult * data) {
             assist_overlay_reveal_markdown(
                 assist_overlay_utf8_character_count(assist_overlay_response_text));
 
-            const bool ask_followup = data->result.continue_conversation ||
-                (!plain_response.empty() && plain_response.back() == '?');
-
-            if (data->final_result && ask_followup) {
-                printf("[Assist] Auto-continuing conversation (question/follow-up). Opening mic...\n");
-                begin_wake_command_capture();
-            } else {
-                assist_overlay_set_state(ASSIST_OVERLAY_DONE, "GOTOWE");
-                assist_overlay_animation_frozen = true;
-                assist_overlay_tts_level = 0;
-                assist_overlay_hide_at = custom_tick_get() + 10000;
-            }
+            assist_overlay_set_state(ASSIST_OVERLAY_DONE, "GOTOWE");
+            assist_overlay_animation_frozen = true;
+            assist_overlay_tts_level = 0;
+            assist_overlay_hide_at = custom_tick_get() + 10000;
         } else {
             if (assist_status_label) lv_label_set_text(assist_status_label, "Błąd Assist");
             if (assist_result_label) lv_label_set_text(assist_result_label, data->result.error.c_str());
