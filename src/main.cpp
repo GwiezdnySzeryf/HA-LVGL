@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.5";
+const char * CURRENT_VERSION = "v1.9.6";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -3305,16 +3305,20 @@ static bool ensure_wake_word_assets(void) {
 
 static bool start_wake_word_listener(void) {
     if (!mic_wake_enabled) return false;
+    if (g_screen_blanked && mic_mute_on_blank) return false;
     static const char * worker = "/tuya/data/mww_worker";
     static const char * model = "/tuya/data/okay_nabu_v2.tflite";
     if (ha_url.empty() || ha_token.empty()) return false;
     if (access(worker, X_OK) != 0 || access(model, R_OK) != 0) {
         if (!ensure_wake_word_assets()) return false;
     }
-    const bool started = g_wake_word_listener.start(worker, model, []() {
+    float thresh = 0.97f;
+    if (mic_wake_sensitivity == 1) thresh = 0.92f;
+    else if (mic_wake_sensitivity == 2) thresh = 0.85f;
+    const bool started = g_wake_word_listener.start(worker, model, thresh, []() {
         assist_wake_pending = true;
     });
-    if (started) printf("[WakeWord] Listening for Okay Nabu.\n");
+    if (started) printf("[WakeWord] Listening for Okay Nabu (thresh=%.2f).\n", thresh);
     else printf("[WakeWord] Start failed: %s\n", g_wake_word_listener.last_error().c_str());
     return started;
 }

@@ -17,7 +17,7 @@ WakeWordListener::~WakeWordListener() {
 }
 
 bool WakeWordListener::start(const std::string& worker_path, const std::string& model_path,
-                             WakeHandler handler) {
+                             float threshold, WakeHandler handler) {
     stop();
     set_error("");
 
@@ -43,7 +43,6 @@ bool WakeWordListener::start(const std::string& worker_path, const std::string& 
     }
     if (capture_pid == 0) {
         prctl(PR_SET_PDEATHSIG, SIGTERM);
-        if (getppid() == 1) _exit(125);
         close(audio_pipe[0]);
         close(output_pipe[0]);
         close(output_pipe[1]);
@@ -72,7 +71,6 @@ bool WakeWordListener::start(const std::string& worker_path, const std::string& 
     }
     if (worker_pid == 0) {
         prctl(PR_SET_PDEATHSIG, SIGTERM);
-        if (getppid() == 1) _exit(125);
         close(audio_pipe[1]);
         close(output_pipe[0]);
         if (dup2(audio_pipe[0], STDIN_FILENO) < 0 ||
@@ -80,7 +78,9 @@ bool WakeWordListener::start(const std::string& worker_path, const std::string& 
             dup2(output_pipe[1], STDERR_FILENO) < 0) _exit(126);
         close(audio_pipe[0]);
         close(output_pipe[1]);
-        execl(worker_path.c_str(), worker_path.c_str(), model_path.c_str(), "-", "2",
+        char thresh_str[16];
+        snprintf(thresh_str, sizeof(thresh_str), "%.2f", threshold);
+        execl(worker_path.c_str(), worker_path.c_str(), model_path.c_str(), "-", "2", thresh_str,
               static_cast<char *>(NULL));
         _exit(127);
     }

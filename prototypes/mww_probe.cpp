@@ -49,11 +49,13 @@ void configure_frontend(FrontendConfig * config) {
 }
 
 int main(int argc, char ** argv) {
-    if (argc < 3 || argc > 4) {
-        std::fprintf(stderr, "usage: %s V2_OKAY_NABU.tflite RAW_PCM|- [channels:1|2]\n", argv[0]);
+    if (argc < 3 || argc > 5) {
+        std::fprintf(stderr, "usage: %s V2_OKAY_NABU.tflite RAW_PCM|- [channels:1|2] [threshold:0.85-0.97]\n", argv[0]);
         return 2;
     }
-    const int channels = argc == 4 ? std::atoi(argv[3]) : 1;
+    const int channels = argc >= 4 ? std::atoi(argv[3]) : 1;
+    const float threshold_arg = argc >= 5 ? std::atof(argv[4]) : 0.97f;
+    const float target_threshold = (threshold_arg >= 0.50f && threshold_arg <= 0.99f) ? threshold_arg : 0.97f;
     if (channels != 1 && channels != 2) {
         std::fprintf(stderr, "channels must be 1 or 2\n");
         return 2;
@@ -200,7 +202,7 @@ int main(int argc, char ** argv) {
             peak = std::max(peak, average);
 
             if (feature_slices >= warmup_until_slice && inference_count >= cooldown_until &&
-                average > 0.97f) {
+                average >= target_threshold) {
                 ++wake_count;
                 cooldown_until = inference_count + 167;
                 std::printf("WAKE score=%.4f count=%d\n", average, wake_count);

@@ -16,7 +16,7 @@ public:
     ~WakeWordListener();
 
     bool start(const std::string& worker_path, const std::string& model_path,
-               WakeHandler handler);
+               float threshold, WakeHandler handler);
     void stop();
 
     bool is_running() const { return running_; }
