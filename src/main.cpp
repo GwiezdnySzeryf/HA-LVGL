@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.10";
+const char * CURRENT_VERSION = "v1.9.11";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -1192,117 +1192,180 @@ static void state_poll_timer_cb(lv_timer_t * timer) {
     }).detach();
 }
 
+struct ReleaseInfo {
+    std::string tag_name;
+    std::string ha_panel_url;
+    size_t ha_panel_size;
+    std::string mww_worker_url;
+    size_t mww_worker_size;
+    std::string model_url;
+    size_t model_size;
+
+    ReleaseInfo() : ha_panel_size(0), mww_worker_size(0), model_size(0) {}
+};
+
+static ReleaseInfo g_latest_release_info;
+
+static std::string parse_github_asset_url(const std::string &json, const std::string &asset_name, size_t * size_out = NULL) {
+    std::string search_str = "\"name\":\"" + asset_name + "\"";
+    size_t name_pos = json.find(search_str);
+    if (name_pos == std::string::npos) {
+        search_str = "\"name\": \"" + asset_name + "\"";
+        name_pos = json.find(search_str);
+    }
+    if (name_pos == std::string::npos) return "";
+
+    size_t url_pos = json.find("\"browser_download_url\"", name_pos);
+    if (url_pos == std::string::npos) return "";
+
+    std::string url = parse_json_value(json.substr(url_pos), "browser_download_url");
+
+    if (size_out) {
+        size_t size_pos = json.find("\"size\"", name_pos);
+        if (size_pos != std::string::npos) {
+            *size_out = parse_json_int_value(json.substr(size_pos), "size");
+        }
+    }
+    return url;
+}
+
+static bool check_github_release(ReleaseInfo & info) {
+    printf("[OTA] Querying GitHub Releases API...\n");
+    system("ip route add default via 192.168.1.1 dev wlan0 2>/dev/null");
+    std::string cmd_fetch = "/tuya/data/curl -fskL --max-time 15 --header \"User-Agent: Mozilla/5.0\" "
+                            "\"https://api.github.com/repos/GwiezdnySzeryf/HA-LVGL/releases/latest\" > /tmp/latest_release.json";
+    system(cmd_fetch.c_str());
+
+    std::ifstream f("/tmp/latest_release.json");
+    if (!f.is_open()) return false;
+    std::stringstream buffer;
+    buffer << f.rdbuf();
+    std::string json = buffer.str();
+    unlink("/tmp/latest_release.json");
+
+    info.tag_name = parse_json_value(json, "tag_name");
+    if (info.tag_name.empty()) return false;
+
+    info.ha_panel_url = parse_github_asset_url(json, "ha_panel", &info.ha_panel_size);
+    if (info.ha_panel_url.empty()) {
+        info.ha_panel_url = parse_json_value(json, "browser_download_url");
+        info.ha_panel_size = parse_json_int_value(json, "size");
+    }
+    if (info.ha_panel_size == 0) info.ha_panel_size = 3280000;
+
+    info.mww_worker_url = parse_github_asset_url(json, "mww_worker", &info.mww_worker_size);
+    if (info.mww_worker_url.empty()) {
+        info.mww_worker_url = "https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/" + info.tag_name + "/mww_worker";
+        info.mww_worker_size = 1253552;
+    }
+
+    info.model_url = parse_github_asset_url(json, "okay_nabu_v2.tflite", &info.model_size);
+    if (info.model_url.empty()) {
+        info.model_url = "https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/" + info.tag_name + "/okay_nabu_v2.tflite";
+        info.model_size = 60264;
+    }
+
+    return !info.ha_panel_url.empty();
+}
+
 struct OtaModalData {
     lv_obj_t * mbox;
     lv_obj_t * bar;
 };
 
-// Perform OTA self-replacement update directly from GitHub Releases API
+// Perform multi-asset OTA self-replacement directly from GitHub Releases
 bool perform_github_ota(lv_obj_t * mbox, lv_obj_t * bar) {
-    printf("[OTA] Starting OTA process...\n");
-    
-    // Ensure default route is set for internet connectivity
+    printf("[OTA] Starting multi-asset download process...\n");
     system("ip route add default via 192.168.1.1 dev wlan0 2>/dev/null");
 
-    // 1. Fetch latest release info via secure wget command from public repo
-    std::string cmd_fetch = "wget -qO- --header=\"User-Agent: Mozilla/5.0\" "
-                            "https://api.github.com/repos/GwiezdnySzeryf/HA-LVGL/releases/latest > /tmp/latest_release.json";
-    
-    printf("[OTA] Querying GitHub Releases API...\n");
-    system(cmd_fetch.c_str());
-    
-    // Read the downloaded release JSON
-    std::ifstream f("/tmp/latest_release.json");
-    if (!f.is_open()) {
-        printf("[OTA] Error: Failed to download release JSON.\n");
-        return false;
-    }
-    std::stringstream buffer;
-    buffer << f.rdbuf();
-    std::string json = buffer.str();
-    unlink("/tmp/latest_release.json");
-    
-    std::string tag_name = parse_json_value(json, "tag_name");
-    std::string download_url = parse_json_value(json, "browser_download_url");
-    size_t expected_size = parse_json_int_value(json, "size");
-    
-    if (tag_name.empty() || download_url.empty()) {
-        printf("[OTA] Error: Failed to parse tag_name or download URL. Releases might be empty.\n");
-        return false;
+    if (g_latest_release_info.ha_panel_url.empty()) {
+        if (!check_github_release(g_latest_release_info)) {
+            printf("[OTA] Error: Unable to fetch release info.\n");
+            return false;
+        }
     }
 
-    if (expected_size == 0) expected_size = 2300000; // Fallback default ~2.3MB
-    
-    printf("[OTA] Latest version: %s (Current: %s), Size: %zu bytes\n", tag_name.c_str(), CURRENT_VERSION, expected_size);
-    if (tag_name == CURRENT_VERSION) {
-        printf("[OTA] Panel is already up to date!\n");
-        return false;
-    }
-    
-    // 2. Download the binary asset from public URL
+    // 1. Download ha_panel.tmp
     unlink("/tuya/data/ha_panel.tmp");
-    printf("[OTA] Downloading new binary asset from %s...\n", download_url.c_str());
-    std::string cmd_download = "/tuya/data/curl -fskL --max-time 120 -o /tuya/data/ha_panel.tmp \"" + download_url + "\" &";
-                               
-    system(cmd_download.c_str());
+    printf("[OTA] Downloading ha_panel from %s...\n", g_latest_release_info.ha_panel_url.c_str());
+    if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Pobieranie ha_panel (1/3)...");
+    std::string cmd = "/tuya/data/curl -fskL --max-time 120 -o /tuya/data/ha_panel.tmp \"" + g_latest_release_info.ha_panel_url + "\" &";
+    system(cmd.c_str());
 
-    // Monitor download progress
+    size_t expected = g_latest_release_info.ha_panel_size > 0 ? g_latest_release_info.ha_panel_size : 3280000;
     int last_pct = -1;
     uint32_t start_ticks = custom_tick_get();
-    while (custom_tick_get() - start_ticks < 60000) { // 60s timeout max
+    while (custom_tick_get() - start_ticks < 60000) {
         struct stat st;
         if (stat("/tuya/data/ha_panel.tmp", &st) == 0) {
-            int pct = (int)((st.st_size * 100) / expected_size);
+            int pct = (int)((st.st_size * 100) / expected);
             if (pct > 100) pct = 100;
-
             if (pct != last_pct) {
                 last_pct = pct;
                 if (bar) lv_bar_set_value(bar, pct, LV_ANIM_OFF);
                 if (mbox) {
-                    char status_txt[128];
-                    snprintf(status_txt, sizeof(status_txt), "Pobieranie: %d%% (%ld / %ld KB)", pct, (long)(st.st_size / 1024), (long)(expected_size / 1024));
-                    lv_label_set_text(lv_msgbox_get_text(mbox), status_txt);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "Pobieranie ha_panel: %d%% (%ld / %ld KB)", pct, (long)(st.st_size / 1024), (long)(expected / 1024));
+                    lv_label_set_text(lv_msgbox_get_text(mbox), buf);
                 }
             }
-
-            if (st.st_size >= (off_t)expected_size && system("pidof curl >/dev/null") != 0) {
-                if (bar) lv_bar_set_value(bar, 100, LV_ANIM_OFF);
-                if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Instalowanie i restart...");
-                lv_timer_handler();
-                usleep(300000);
-                break;
-            }
+            if (st.st_size >= (off_t)expected && system("pidof curl >/dev/null") != 0) break;
         }
         lv_timer_handler();
-        usleep(100000); // 100ms
+        usleep(100000);
     }
 
     if (access("/tuya/data/ha_panel.tmp", F_OK) != 0) {
-        printf("[OTA] Error: Failed to download binary asset.\n");
+        printf("[OTA] Error: Failed to download ha_panel.\n");
         return false;
     }
-    
-    // 3. Unix Self-Replacement
-    printf("[OTA] Performing self-replacement...\n");
+
+    // 2. Download mww_worker
+    if (!g_latest_release_info.mww_worker_url.empty()) {
+        printf("[OTA] Downloading mww_worker from %s...\n", g_latest_release_info.mww_worker_url.c_str());
+        if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Pobieranie mww_worker (2/3)...");
+        lv_timer_handler();
+        std::string cmd_mww = "/tuya/data/curl -fskL --max-time 60 -o /tuya/data/mww_worker.tmp \"" + g_latest_release_info.mww_worker_url + "\"";
+        if (system(cmd_mww.c_str()) == 0 && access("/tuya/data/mww_worker.tmp", F_OK) == 0) {
+            chmod("/tuya/data/mww_worker.tmp", 0755);
+            rename("/tuya/data/mww_worker.tmp", "/tuya/data/mww_worker");
+            printf("[OTA] Updated /tuya/data/mww_worker.\n");
+        }
+    }
+
+    // 3. Download okay_nabu_v2.tflite
+    if (!g_latest_release_info.model_url.empty()) {
+        printf("[OTA] Downloading okay_nabu_v2.tflite from %s...\n", g_latest_release_info.model_url.c_str());
+        if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Pobieranie modelu (3/3)...");
+        lv_timer_handler();
+        std::string cmd_mdl = "/tuya/data/curl -fskL --max-time 60 -o /tuya/data/okay_nabu_v2.tflite.tmp \"" + g_latest_release_info.model_url + "\"";
+        if (system(cmd_mdl.c_str()) == 0 && access("/tuya/data/okay_nabu_v2.tflite.tmp", F_OK) == 0) {
+            rename("/tuya/data/okay_nabu_v2.tflite.tmp", "/tuya/data/okay_nabu_v2.tflite");
+            printf("[OTA] Updated /tuya/data/okay_nabu_v2.tflite.\n");
+        }
+    }
+
+    // 4. Clean processes and self-replace
+    if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Instalowanie i restart...");
+    if (bar) lv_bar_set_value(bar, 100, LV_ANIM_OFF);
+    lv_timer_handler();
+    usleep(200000);
+
+    system("killall -9 mww_worker arecord gst-launch-1.0 2>/dev/null");
     chmod("/tuya/data/ha_panel.tmp", 0755);
-    
-    // Rename current binary to .old (this releases kernel execution lock!)
     rename("/tuya/data/ha_panel", "/tuya/data/ha_panel.old");
-    
-    // Rename temp binary to the main target path
+
     if (rename("/tuya/data/ha_panel.tmp", "/tuya/data/ha_panel") != 0) {
-        // Rollback on failure
         rename("/tuya/data/ha_panel.old", "/tuya/data/ha_panel");
         printf("[OTA] Error: Failed to replace main binary.\n");
         return false;
     }
-    
-    // 4. Exec new binary to reload the app in-place!
+
     printf("[OTA] Success! Executing new binary in-place...\n");
     char *args[] = {(char *)"/tuya/data/ha_panel", NULL};
     execv(args[0], args);
-    
-    return true; // Unreachable if execv succeeds
+
+    return true;
 }
 
 // Event callback for native LVGL buttons
@@ -1463,10 +1526,19 @@ static void save_mqtt_btn_cb(lv_event_t * e) {
     close_mqtt_screen();
 }
 
+static lv_obj_t * updates_status_title_label = NULL;
+static lv_obj_t * updates_status_sub_label = NULL;
+static lv_obj_t * updates_action_btn = NULL;
+static lv_obj_t * updates_action_btn_label = NULL;
+
 static void close_updates_screen(void) {
     if (updates_screen) {
         lv_obj_del_async(updates_screen);
         updates_screen = NULL;
+        updates_status_title_label = NULL;
+        updates_status_sub_label = NULL;
+        updates_action_btn = NULL;
+        updates_action_btn_label = NULL;
     }
 }
 
@@ -2332,6 +2404,8 @@ static void updates_back_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_updates_screen();
 }
 
+static void check_ota_btn_cb(lv_event_t * e);
+
 static void start_ota_btn_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 
@@ -2352,6 +2426,72 @@ static void start_ota_btn_cb(lv_event_t * e) {
 
     OtaModalData * data = new OtaModalData{mbox, bar};
     lv_timer_create(ota_update_timer_cb, 150, data);
+}
+
+static void check_ota_async_timer_cb(lv_timer_t * timer) {
+    lv_timer_del(timer);
+    bool ok = check_github_release(g_latest_release_info);
+
+    if (!updates_screen) return;
+
+    if (!ok) {
+        if (updates_status_sub_label) {
+            lv_label_set_text(updates_status_sub_label, "Błąd połączenia z GitHub API.");
+        }
+        if (updates_action_btn_label) {
+            lv_label_set_text(updates_action_btn_label, "Spróbuj ponownie");
+        }
+        if (updates_action_btn) {
+            lv_obj_clear_state(updates_action_btn, LV_STATE_DISABLED);
+        }
+    } else if (g_latest_release_info.tag_name == CURRENT_VERSION) {
+        if (updates_status_title_label) {
+            lv_label_set_text(updates_status_title_label, "Brak nowych aktualizacji");
+        }
+        if (updates_status_sub_label) {
+            std::string txt = "✓ Posiadasz najnowszą wersję (" + std::string(CURRENT_VERSION) + ").";
+            lv_label_set_text(updates_status_sub_label, txt.c_str());
+        }
+        if (updates_action_btn_label) {
+            lv_label_set_text(updates_action_btn_label, "Sprawdź ponownie");
+        }
+        if (updates_action_btn) {
+            lv_obj_clear_state(updates_action_btn, LV_STATE_DISABLED);
+        }
+    } else {
+        if (updates_status_title_label) {
+            lv_label_set_text(updates_status_title_label, "Dostępna nowa wersja!");
+        }
+        if (updates_status_sub_label) {
+            std::string txt = "Wersja " + g_latest_release_info.tag_name + " jest dostępna na GitHubie.";
+            lv_label_set_text(updates_status_sub_label, txt.c_str());
+        }
+        if (updates_action_btn_label) {
+            std::string txt = "Zaktualizuj do " + g_latest_release_info.tag_name;
+            lv_label_set_text(updates_action_btn_label, txt.c_str());
+        }
+        if (updates_action_btn) {
+            lv_obj_clear_state(updates_action_btn, LV_STATE_DISABLED);
+            lv_obj_remove_event_cb(updates_action_btn, check_ota_btn_cb);
+            lv_obj_add_event_cb(updates_action_btn, start_ota_btn_cb, LV_EVENT_CLICKED, NULL);
+        }
+    }
+}
+
+static void check_ota_btn_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+    if (updates_action_btn) {
+        lv_obj_add_state(updates_action_btn, LV_STATE_DISABLED);
+    }
+    if (updates_action_btn_label) {
+        lv_label_set_text(updates_action_btn_label, "Sprawdzanie...");
+    }
+    if (updates_status_sub_label) {
+        lv_label_set_text(updates_status_sub_label, "Łączenie z GitHub API...");
+    }
+
+    lv_timer_create(check_ota_async_timer_cb, 50, NULL);
 }
 
 static void create_updates_screen(void) {
@@ -2380,16 +2520,17 @@ static void create_updates_screen(void) {
     lv_obj_center(version_label);
 
     lv_obj_t * network = settings_m3_card(list, 20, 224, 440, 72);
-    settings_m3_label(network, "Połączenie z serwerem wydań", 16, 10, M3_ON_SURFACE,
-                      &lv_font_montserrat_16_pl);
-    settings_m3_label(network, online ? "Gotowe do sprawdzenia" : "Brak połączenia z siecią",
-                      16, 40, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    updates_status_title_label = settings_m3_label(network, "Status aktualizacji", 16, 10, M3_ON_SURFACE,
+                                                    &lv_font_montserrat_16_pl);
+    updates_status_sub_label = settings_m3_label(network, online ? "Kliknij przycisk poniżej, aby sprawdzić wersję." : "Brak połączenia z siecią",
+                                                  16, 40, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
     lv_obj_t * dot = lv_obj_create(network);
     lv_obj_set_size(dot, 10, 10);
     lv_obj_set_pos(dot, 406, 31);
     settings_m3_surface(dot, online ? M3_SUCCESS : M3_OUTLINE, 5);
 
-    settings_m3_button(list, "Sprawdź i aktualizuj", 20, 316, 440, start_ota_btn_cb);
+    updates_action_btn = settings_m3_button(list, "Sprawdź aktualizacje", 20, 316, 440, check_ota_btn_cb);
+    updates_action_btn_label = lv_obj_get_child(updates_action_btn, 0);
 }
 
 static void diagnostics_back_event_cb(lv_event_t * e) {
@@ -3312,6 +3453,11 @@ static bool ensure_wake_word_assets(void) {
 static bool start_wake_word_listener(void) {
     if (!mic_wake_enabled) return false;
     if (g_screen_blanked && mic_mute_on_blank) return false;
+
+    // Clean any zombie/dangling capture or worker processes to release ALSA hw:0,0
+    system("killall -9 mww_worker arecord 2>/dev/null");
+    usleep(30000);
+
     static const char * worker = "/tuya/data/mww_worker";
     static const char * model = "/tuya/data/okay_nabu_v2.tflite";
     if (ha_url.empty() || ha_token.empty()) return false;
