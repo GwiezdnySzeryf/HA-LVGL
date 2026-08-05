@@ -1377,6 +1377,8 @@ static void create_mqtt_screen(void);
 static void create_display_screen(void);
 static void create_sound_screen(void);
 static void close_sound_screen(void);
+static void create_microphone_screen(void);
+static void close_microphone_screen(void);
 static void create_assist_screen(void);
 static void close_assist_screen(void);
 static void create_todo_screen(const char * title);
@@ -2030,6 +2032,7 @@ static void close_settings(void) {
     close_info_screen();
     close_display_screen();
     close_sound_screen();
+    close_microphone_screen();
     close_assist_screen();
     close_todo_screen();
     close_wifi_screen();
@@ -2070,7 +2073,7 @@ static void settings_card_event_cb(lv_event_t * e) {
     } else if (action == SETTINGS_ACTION_WEB_PORTAL) {
         create_web_portal_screen();
     } else if (action == SETTINGS_ACTION_MICROPHONE) {
-        create_todo_screen("Mikrofon");
+        create_microphone_screen();
     } else if (action == SETTINGS_ACTION_ASSIST) {
         create_assist_screen();
     } else if (action == SETTINGS_ACTION_SENDSPIN) {
@@ -2926,6 +2929,181 @@ static void create_sound_screen(void) {
     settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
 }
 
+static lv_obj_t * microphone_screen = NULL;
+static int mic_gain_percent = 85;
+static bool mic_wake_enabled = true;
+static int mic_wake_sensitivity = 0; // 0=Standardowa, 1=Wysoka, 2=Maksymalna
+static bool mic_hpf_enabled = true;
+static bool mic_mute_on_blank = true;
+static bool mic_mute_on_tts = true;
+
+static lv_obj_t * mic_gain_slider = NULL;
+static lv_obj_t * mic_gain_label = NULL;
+static lv_obj_t * mic_sensitivity_buttons[3] = {NULL, NULL, NULL};
+static lv_obj_t * mic_test_bar = NULL;
+static lv_obj_t * mic_test_label = NULL;
+static lv_timer_t * mic_test_timer = NULL;
+
+static void close_microphone_screen(void) {
+    if (mic_test_timer) {
+        lv_timer_del(mic_test_timer);
+        mic_test_timer = NULL;
+    }
+    if (microphone_screen) {
+        lv_obj_del_async(microphone_screen);
+        microphone_screen = NULL;
+        mic_gain_slider = NULL;
+        mic_gain_label = NULL;
+        mic_test_bar = NULL;
+        mic_test_label = NULL;
+        for (int i = 0; i < 3; ++i) mic_sensitivity_buttons[i] = NULL;
+    }
+}
+
+static void microphone_back_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_microphone_screen();
+}
+
+static void mic_gain_event_cb(lv_event_t * e) {
+    lv_obj_t * slider = lv_event_get_target(e);
+    mic_gain_percent = lv_slider_get_value(slider);
+    set_percent_label(mic_gain_label, mic_gain_percent);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        save_int_file("/tuya/data/ha_mic_gain", mic_gain_percent);
+#ifndef PC_SIMULATOR
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "amixer -q -c 0 sset 'ADC ALC Group 0' %d%% 2>/dev/null", mic_gain_percent);
+        system(cmd);
+#endif
+    }
+}
+
+static void mic_toggle_event_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+    bool enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    int setting = (int)(long)lv_event_get_user_data(e);
+    if (setting == 0) {
+        mic_wake_enabled = enabled;
+        save_int_file("/tuya/data/ha_mic_wake_enabled", enabled ? 1 : 0);
+        if (!enabled) g_wake_word_listener.stop();
+    } else if (setting == 1) {
+        mic_hpf_enabled = enabled;
+        save_int_file("/tuya/data/ha_mic_hpf", enabled ? 1 : 0);
+    } else if (setting == 2) {
+        mic_mute_on_blank = enabled;
+        save_int_file("/tuya/data/ha_mic_mute_blank", enabled ? 1 : 0);
+    } else if (setting == 3) {
+        mic_mute_on_tts = enabled;
+        save_int_file("/tuya/data/ha_mic_mute_tts", enabled ? 1 : 0);
+    }
+}
+
+static void mic_sensitivity_button_cb(lv_event_t * e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    int index = (int)(long)lv_event_get_user_data(e);
+    mic_wake_sensitivity = index;
+    save_int_file("/tuya/data/ha_mic_wake_sensitivity", index);
+    for (int i = 0; i < 3; ++i) {
+        if (!mic_sensitivity_buttons[i]) continue;
+        bool sel = (i == index);
+        settings_m3_surface(mic_sensitivity_buttons[i], sel ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
+        lv_obj_set_style_border_width(mic_sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
+    }
+}
+
+static void mic_test_timer_cb(lv_timer_t * timer) {
+    (void)timer;
+    if (!microphone_screen) return;
+    int level = g_assist_audio.is_running() ? g_assist_audio.level_percent() : 0;
+    if (mic_test_bar) lv_bar_set_value(mic_test_bar, level, LV_ANIM_ON);
+}
+
+static void create_microphone_screen(void) {
+    if (microphone_screen) return;
+
+    mic_gain_percent = read_int_file("/tuya/data/ha_mic_gain", 85);
+    mic_wake_enabled = read_int_file("/tuya/data/ha_mic_wake_enabled", 1) != 0;
+    mic_wake_sensitivity = read_int_file("/tuya/data/ha_mic_wake_sensitivity", 0);
+    if (mic_wake_sensitivity < 0 || mic_wake_sensitivity > 2) mic_wake_sensitivity = 0;
+    mic_hpf_enabled = read_int_file("/tuya/data/ha_mic_hpf", 1) != 0;
+    mic_mute_on_blank = read_int_file("/tuya/data/ha_mic_mute_blank", 1) != 0;
+    mic_mute_on_tts = read_int_file("/tuya/data/ha_mic_mute_tts", 1) != 0;
+
+    lv_obj_t * list = NULL;
+    microphone_screen = create_subscreen_base("Mikrofon", microphone_back_event_cb, &list);
+    settings_m3_hero(list, "Mikrofon i Wybudzanie", "microWakeWord • ALC • Tłumienie szumów", ICON_MIC, true);
+
+    // Card 1: Wake Word "Okay Nabu"
+    lv_obj_t * wake_card = settings_m3_card(list, 20, 96, 440, 148);
+    settings_m3_label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    settings_m3_label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    lv_obj_t * wake_sw = lv_switch_create(wake_card);
+    settings_m3_style_switch(wake_sw);
+    lv_obj_set_pos(wake_sw, 374, 20);
+    if (mic_wake_enabled) lv_obj_add_state(wake_sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(wake_sw, mic_toggle_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(long)0);
+
+    settings_m3_label(wake_card, "Czułość wybudzania:", 16, 88, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_12_pl);
+    const char * sens_labels[] = {"Standardowa", "Wysoka", "Maksymalna"};
+    for (int i = 0; i < 3; ++i) {
+        bool sel = (i == mic_wake_sensitivity);
+        mic_sensitivity_buttons[i] = lv_btn_create(wake_card);
+        lv_obj_set_size(mic_sensitivity_buttons[i], 128, 38);
+        lv_obj_set_pos(mic_sensitivity_buttons[i], 16 + i * 136, 102);
+        settings_m3_surface(mic_sensitivity_buttons[i], sel ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
+        lv_obj_set_style_border_color(mic_sensitivity_buttons[i], M3_OUTLINE_VARIANT, LV_PART_MAIN);
+        lv_obj_set_style_border_width(mic_sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
+        lv_obj_add_event_cb(mic_sensitivity_buttons[i], mic_sensitivity_button_cb, LV_EVENT_CLICKED, (void *)(long)i);
+        lv_obj_t * lbl = settings_m3_label(mic_sensitivity_buttons[i], sens_labels[i], 0, 0, sel ? M3_ON_PRIMARY_CONTAINER : M3_ON_SURFACE, &lv_font_montserrat_12_pl);
+        lv_obj_center(lbl);
+    }
+
+    // Card 2: Mic Gain
+    lv_obj_t * gain_card = settings_m3_card(list, 20, 256, 440, 126);
+    settings_m3_label(gain_card, "Czułość mikrofonu (Gain)", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    char gain_text[16];
+    snprintf(gain_text, sizeof(gain_text), "%d%%", mic_gain_percent);
+    mic_gain_label = settings_m3_label(gain_card, gain_text, 0, 14, M3_PRIMARY, &lv_font_montserrat_20_pl);
+    lv_obj_align(mic_gain_label, LV_ALIGN_TOP_RIGHT, -16, 14);
+
+    mic_gain_slider = lv_slider_create(gain_card);
+    lv_obj_set_size(mic_gain_slider, 408, 20);
+    lv_obj_set_pos(mic_gain_slider, 16, 77);
+    lv_slider_set_range(mic_gain_slider, 10, 100);
+    lv_slider_set_value(mic_gain_slider, mic_gain_percent, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(mic_gain_slider, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mic_gain_slider, M3_PRIMARY, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(mic_gain_slider, M3_ON_PRIMARY_CONTAINER, LV_PART_KNOB);
+    lv_obj_add_event_cb(mic_gain_slider, mic_gain_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(mic_gain_slider, mic_gain_event_cb, LV_EVENT_RELEASED, NULL);
+
+    // Card 3: Switches
+    create_sound_switch_card(list, 394, "Filtr górnoprzepustowy (HPF)", mic_hpf_enabled, 1);
+    create_sound_switch_card(list, 482, "Wycisz przy wygaszeniu", mic_mute_on_blank, 2);
+    create_sound_switch_card(list, 570, "Wycisz podczas mowy TTS", mic_mute_on_tts, 3);
+
+    // Card 4: Signal Test
+    lv_obj_t * test_card = settings_m3_card(list, 20, 658, 440, 116);
+    settings_m3_label(test_card, "Sygnał wejściowy", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
+    mic_test_label = settings_m3_label(test_card, "Test sygnału mikrofonu", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+
+    mic_test_bar = lv_bar_create(test_card);
+    lv_obj_set_size(mic_test_bar, 408, 14);
+    lv_obj_set_pos(mic_test_bar, 16, 78);
+    lv_bar_set_range(mic_test_bar, 0, 100);
+    lv_bar_set_value(mic_test_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(mic_test_bar, M3_OUTLINE_VARIANT, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(mic_test_bar, M3_PRIMARY, LV_PART_INDICATOR);
+
+    mic_test_timer = lv_timer_create(mic_test_timer_cb, 100, NULL);
+
+    lv_obj_t * spacer = lv_obj_create(list);
+    lv_obj_set_size(spacer, 1, 20);
+    lv_obj_set_pos(spacer, 0, 786);
+    settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
+}
+
 static void todo_back_event_cb(lv_event_t * e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) close_todo_screen();
 }
@@ -3093,6 +3271,7 @@ static void apply_next_assist_pipeline_result(void) {
 }
 
 static bool start_wake_word_listener(void) {
+    if (!mic_wake_enabled) return false;
     static const char * worker = "/tuya/data/mww_worker";
     static const char * model = "/tuya/data/okay_nabu_v2.tflite";
     if (ha_url.empty() || ha_token.empty() || access(worker, X_OK) != 0 ||
@@ -4320,7 +4499,7 @@ static void create_settings_screen(void) {
     add_settings_card(list, &y, ICON_VOLUME, lv_color_make(0x7A, 0x48, 0x92),
                       "Dźwięki", "Głośność i powiadomienia", SETTINGS_ACTION_CONTROLS);
     add_settings_card(list, &y, ICON_MIC, lv_color_make(0x6B, 0x57, 0x8A),
-                      "Mikrofon", "TODO", SETTINGS_ACTION_MICROPHONE);
+                      "Mikrofon", "microWakeWord i czułość", SETTINGS_ACTION_MICROPHONE);
     add_settings_card(list, &y, ICON_TOOLS, lv_color_make(0x4B, 0x63, 0x73),
                       "Sendspin", "TODO", SETTINGS_ACTION_SENDSPIN);
     add_settings_card(list, &y, ICON_PALETTE, lv_color_make(0x8C, 0x43, 0x53),

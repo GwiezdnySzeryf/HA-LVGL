@@ -388,14 +388,38 @@ bool play_pcm_with_levels(const std::string& filename,
     return false;
 }
 
+bool stream_and_play_tts(const ParsedUrl& parsed, const std::string& path,
+                         const std::function<void()>& on_playback) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", parsed.port);
+    const std::string url = "https://" + parsed.host + ":" + port_str + parsed.base_path + path;
+
+    const std::vector<std::string> stream_cmd = {
+        "/bin/sh", "-c",
+        "/tuya/data/curl -fskL --max-time 30 \"" + url + "\" | "
+        "/usr/bin/gst-launch-1.0 -q fdsrc fd=0 ! decodebin ! "
+        "audioconvert ! audioresample ! "
+        "audio/x-raw,format=S16LE,rate=48000,channels=2 ! "
+        "alsasink device=hw:0,0 sync=false"
+    };
+
+    if (on_playback) on_playback();
+    return run_process(stream_cmd, 60);
+}
+
 bool download_and_play_tts(const ParsedUrl& parsed, const std::string& path,
                            const std::string& mime_type, std::string * error,
                            const std::function<void()>& on_playback,
                            const std::function<void(int)>& on_level) {
+    (void)on_level;
     if (path.compare(0, 15, "/api/tts_proxy/") != 0 ||
         mime_type.compare(0, 6, "audio/") != 0) {
         *error = "Home Assistant zwrócił nieprawidłowe audio TTS";
         return false;
+    }
+
+    if (stream_and_play_tts(parsed, path, on_playback)) {
+        return true;
     }
 
     char port[16];
@@ -403,9 +427,7 @@ bool download_and_play_tts(const ParsedUrl& parsed, const std::string& path,
     const std::string url = "https://" + parsed.host + ":" + port + parsed.base_path + path;
     char filename[96];
     snprintf(filename, sizeof(filename), "/tmp/ha_assist_tts_%ld", static_cast<long>(getpid()));
-    const std::string pcm_filename = std::string(filename) + ".pcm";
     unlink(filename);
-    unlink(pcm_filename.c_str());
 
     const std::vector<std::string> download = {
         "/tuya/data/curl", "-fskL", "--max-time", "15", "--max-filesize", "8388608",
@@ -417,32 +439,16 @@ bool download_and_play_tts(const ParsedUrl& parsed, const std::string& path,
         return false;
     }
 
-    const std::vector<std::string> decode = {
+    const std::vector<std::string> fallback_playback = {
         "/usr/bin/gst-launch-1.0", "-q",
         "filesrc", "location=" + std::string(filename), "!",
         "decodebin", "!", "audioconvert", "!", "audioresample", "!",
         "audio/x-raw,format=S16LE,rate=48000,channels=2", "!",
-        "filesink", "location=" + pcm_filename
+        "alsasink", "device=hw:0,0", "sync=false"
     };
-    bool played = false;
-    struct stat pcm_stat;
-    if (run_process(decode, 30) && stat(pcm_filename.c_str(), &pcm_stat) == 0 &&
-        pcm_stat.st_size > 0 && pcm_stat.st_size <= 24 * 1024 * 1024) {
-        if (on_playback) on_playback();
-        played = play_pcm_with_levels(pcm_filename, on_level);
-    } else {
-        const std::vector<std::string> fallback_playback = {
-            "/usr/bin/gst-launch-1.0", "-q",
-            "filesrc", "location=" + std::string(filename), "!",
-            "decodebin", "!", "audioconvert", "!", "audioresample", "!",
-            "audio/x-raw,format=S16LE,rate=48000,channels=2", "!",
-            "alsasink", "device=hw:0,0", "sync=true"
-        };
-        if (on_playback) on_playback();
-        played = run_process(fallback_playback, 90);
-    }
+    if (on_playback) on_playback();
+    bool played = run_process(fallback_playback, 90);
     unlink(filename);
-    unlink(pcm_filename.c_str());
     if (!played) *error = "Nie można odtworzyć odpowiedzi głosowej";
     return played;
 }

@@ -56,6 +56,8 @@ SOUND_PC_APP_OBJ = $(SOUND_PC_BUILD)/prototypes/lvgl_sound_m3.o
 SOUND_PC_BIN = /tmp/opencode/tpp01_sound_m3
 ASSIST_EDGE_PC_APP_OBJ = $(SOUND_PC_BUILD)/prototypes/lvgl_assist_edge_variants.o
 ASSIST_EDGE_PC_BIN = /tmp/opencode/tpp01_assist_edge_variants
+MIC_PC_APP_OBJ = $(SOUND_PC_BUILD)/prototypes/lvgl_microphone_m3.o
+MIC_PC_BIN = /tmp/opencode/tpp01_microphone_m3
 
 # 3. Compilation Rules
 all: $(BIN)
@@ -99,6 +101,10 @@ assist-edge-preview: $(SOUND_PC_COBJS) $(SOUND_PC_HAL_OBJ) $(ASSIST_EDGE_PC_APP_
 	@echo "[LINK_PC] $(ASSIST_EDGE_PC_BIN)"
 	g++ $(SOUND_PC_HAL_OBJ) $(ASSIST_EDGE_PC_APP_OBJ) $(SOUND_PC_COBJS) -lSDL2 -lpthread -o $(ASSIST_EDGE_PC_BIN)
 
+microphone-preview: $(SOUND_PC_COBJS) $(SOUND_PC_HAL_OBJ) $(MIC_PC_APP_OBJ)
+	@echo "[LINK_PC] $(MIC_PC_BIN)"
+	g++ $(SOUND_PC_HAL_OBJ) $(MIC_PC_APP_OBJ) $(SOUND_PC_COBJS) -lSDL2 -lpthread -o $(MIC_PC_BIN)
+
 $(SOUND_PC_BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "[CC_PC] $<"
@@ -115,6 +121,11 @@ $(SOUND_PC_APP_OBJ): prototypes/lvgl_sound_m3.cpp
 	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
 
 $(ASSIST_EDGE_PC_APP_OBJ): prototypes/lvgl_assist_edge_variants.cpp
+	@mkdir -p $(dir $@)
+	@echo "[CXX_PC] $<"
+	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
+
+$(MIC_PC_APP_OBJ): prototypes/lvgl_microphone_m3.cpp
 	@mkdir -p $(dir $@)
 	@echo "[CXX_PC] $<"
 	g++ -O2 -Wall -Wshadow -DPC_SIMULATOR -DLV_CONF_INCLUDE_SIMPLE -I. -I./lvgl -std=c++11 -c $< -o $@
