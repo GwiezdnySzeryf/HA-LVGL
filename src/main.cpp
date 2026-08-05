@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.9";
+const char * CURRENT_VERSION = "v1.9.10";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -3289,11 +3289,12 @@ static bool ensure_wake_word_assets(void) {
 
     if (worker_ok && model_ok) return true;
 
-    printf("[WakeWord] Assets missing on device. Downloading from GitHub Release...\n");
+    printf("[WakeWord] Assets missing on device. Downloading from GitHub Release %s...\n", CURRENT_VERSION);
+    std::string tag = CURRENT_VERSION;
 
     if (!worker_ok) {
-        std::string cmd = "/tuya/data/curl -fskL --max-time 30 -o /tuya/data/mww_worker "
-                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/v1.9.5/mww_worker\"";
+        std::string cmd = "/tuya/data/curl -fskL --max-time 45 -o /tuya/data/mww_worker "
+                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/" + tag + "/mww_worker\"";
         if (system(cmd.c_str()) == 0) {
             system("chmod 755 /tuya/data/mww_worker 2>/dev/null");
         }
@@ -3301,7 +3302,7 @@ static bool ensure_wake_word_assets(void) {
 
     if (!model_ok) {
         std::string cmd = "/tuya/data/curl -fskL --max-time 30 -o /tuya/data/okay_nabu_v2.tflite "
-                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/v1.9.5/okay_nabu_v2.tflite\"";
+                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/" + tag + "/okay_nabu_v2.tflite\"";
         system(cmd.c_str());
     }
 
