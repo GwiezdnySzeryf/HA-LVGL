@@ -2950,11 +2950,14 @@ static lv_obj_t * mic_test_bar = NULL;
 static lv_obj_t * mic_test_label = NULL;
 static lv_timer_t * mic_test_timer = NULL;
 
+static bool start_wake_word_listener(void);
+
 static void close_microphone_screen(void) {
     if (mic_test_timer) {
         lv_timer_del(mic_test_timer);
         mic_test_timer = NULL;
     }
+    g_assist_audio.stop();
     if (microphone_screen) {
         lv_obj_del_async(microphone_screen);
         microphone_screen = NULL;
@@ -2964,6 +2967,7 @@ static void close_microphone_screen(void) {
         mic_test_label = NULL;
         for (int i = 0; i < 3; ++i) mic_sensitivity_buttons[i] = NULL;
     }
+    start_wake_word_listener();
 }
 
 static void microphone_back_event_cb(lv_event_t * e) {
@@ -3036,26 +3040,28 @@ static void create_microphone_screen(void) {
     mic_mute_on_blank = read_int_file("/tuya/data/ha_mic_mute_blank", 1) != 0;
     mic_mute_on_tts = read_int_file("/tuya/data/ha_mic_mute_tts", 1) != 0;
 
+    g_wake_word_listener.stop();
+    g_assist_audio.start([](const int16_t *, size_t) {});
+
     lv_obj_t * list = NULL;
     microphone_screen = create_subscreen_base("Mikrofon", microphone_back_event_cb, &list);
 
     // Card 1: Wake Word "Okay Nabu"
-    lv_obj_t * wake_card = settings_m3_card(list, 20, 8, 440, 148);
-    settings_m3_label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
-    settings_m3_label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_t * wake_card = settings_m3_card(list, 20, 8, 440, 128);
+    settings_m3_label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 18, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
     lv_obj_t * wake_sw = lv_switch_create(wake_card);
     settings_m3_style_switch(wake_sw);
-    lv_obj_set_pos(wake_sw, 374, 20);
+    lv_obj_set_pos(wake_sw, 374, 16);
     if (mic_wake_enabled) lv_obj_add_state(wake_sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(wake_sw, mic_toggle_event_cb, LV_EVENT_VALUE_CHANGED, (void *)(long)0);
 
-    settings_m3_label(wake_card, "Czułość wybudzania:", 16, 88, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_12_pl);
+    settings_m3_label(wake_card, "Czułość wybudzania:", 16, 56, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_12_pl);
     const char * sens_labels[] = {"Standardowa", "Wysoka", "Maksymalna"};
     for (int i = 0; i < 3; ++i) {
         bool sel = (i == mic_wake_sensitivity);
         mic_sensitivity_buttons[i] = lv_btn_create(wake_card);
         lv_obj_set_size(mic_sensitivity_buttons[i], 124, 38);
-        lv_obj_set_pos(mic_sensitivity_buttons[i], 16 + i * 142, 102);
+        lv_obj_set_pos(mic_sensitivity_buttons[i], 16 + i * 142, 76);
         settings_m3_surface(mic_sensitivity_buttons[i], sel ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
         lv_obj_set_style_border_color(mic_sensitivity_buttons[i], M3_OUTLINE_VARIANT, LV_PART_MAIN);
         lv_obj_set_style_border_width(mic_sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
@@ -3065,7 +3071,7 @@ static void create_microphone_screen(void) {
     }
 
     // Card 2: Mic Gain
-    lv_obj_t * gain_card = settings_m3_card(list, 20, 168, 440, 126);
+    lv_obj_t * gain_card = settings_m3_card(list, 20, 148, 440, 126);
     settings_m3_label(gain_card, "Czułość mikrofonu (Gain)", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
     char gain_text[16];
     snprintf(gain_text, sizeof(gain_text), "%d%%", mic_gain_percent);
@@ -3084,14 +3090,14 @@ static void create_microphone_screen(void) {
     lv_obj_add_event_cb(mic_gain_slider, mic_gain_event_cb, LV_EVENT_RELEASED, NULL);
 
     // Card 3: Switches
-    create_sound_switch_card(list, 306, "Filtr górnoprzepustowy (HPF)", mic_hpf_enabled, 1);
-    create_sound_switch_card(list, 394, "Wycisz przy wygaszeniu", mic_mute_on_blank, 2);
-    create_sound_switch_card(list, 482, "Wycisz podczas mowy TTS", mic_mute_on_tts, 3);
+    create_sound_switch_card(list, 286, "Filtr górnoprzepustowy (HPF)", mic_hpf_enabled, 1);
+    create_sound_switch_card(list, 374, "Wycisz przy wygaszeniu", mic_mute_on_blank, 2);
+    create_sound_switch_card(list, 462, "Wycisz podczas mowy TTS", mic_mute_on_tts, 3);
 
     // Card 4: Signal Test
-    lv_obj_t * test_card = settings_m3_card(list, 20, 570, 440, 116);
+    lv_obj_t * test_card = settings_m3_card(list, 20, 550, 440, 116);
     settings_m3_label(test_card, "Sygnał wejściowy", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
-    mic_test_label = settings_m3_label(test_card, "Test sygnału mikrofonu", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    mic_test_label = settings_m3_label(test_card, "Test sygnału mikrofonu na żywo", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
 
     mic_test_bar = lv_bar_create(test_card);
     lv_obj_set_size(mic_test_bar, 408, 14);
@@ -3105,7 +3111,7 @@ static void create_microphone_screen(void) {
 
     lv_obj_t * spacer = lv_obj_create(list);
     lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, 698);
+    lv_obj_set_pos(spacer, 0, 678);
     settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
 }
 

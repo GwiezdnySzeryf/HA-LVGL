@@ -159,22 +159,21 @@ static void create_microphone_screen(void) {
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
     // Card 1: Wake Word "Okay Nabu"
-    lv_obj_t * wake_card = card(list, 20, 8, 440, 148);
-    label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
-    label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    lv_obj_t * wake_card = card(list, 20, 8, 440, 128);
+    label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 18, ON_SURFACE, &lv_font_montserrat_20_pl);
     lv_obj_t * wake_sw = lv_switch_create(wake_card);
     style_switch(wake_sw);
-    lv_obj_set_pos(wake_sw, 374, 20);
+    lv_obj_set_pos(wake_sw, 374, 16);
     if (wake_word_enabled) lv_obj_add_state(wake_sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(wake_sw, toggle_cb, LV_EVENT_VALUE_CHANGED, &wake_word_enabled);
 
-    label(wake_card, "Czułość wybudzania:", 16, 88, ON_SURFACE_VARIANT, &lv_font_montserrat_12_pl);
+    label(wake_card, "Czułość wybudzania:", 16, 56, ON_SURFACE_VARIANT, &lv_font_montserrat_12_pl);
     const char * sens_labels[] = {"Standardowa", "Wysoka", "Maksymalna"};
     for (int i = 0; i < 3; ++i) {
         bool sel = (i == wake_sensitivity_index);
         sensitivity_buttons[i] = lv_btn_create(wake_card);
         lv_obj_set_size(sensitivity_buttons[i], 124, 38);
-        lv_obj_set_pos(sensitivity_buttons[i], 16 + i * 142, 102);
+        lv_obj_set_pos(sensitivity_buttons[i], 16 + i * 142, 76);
         surface(sensitivity_buttons[i], sel ? PRIMARY_CONTAINER : SURFACE_HIGH, 19);
         lv_obj_set_style_border_color(sensitivity_buttons[i], OUTLINE_VARIANT, LV_PART_MAIN);
         lv_obj_set_style_border_width(sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
@@ -184,7 +183,7 @@ static void create_microphone_screen(void) {
     }
 
     // Card 2: Mic Gain / ALC
-    lv_obj_t * gain_card = card(list, 20, 168, 440, 126);
+    lv_obj_t * gain_card = card(list, 20, 148, 440, 126);
     label(gain_card, "Czułość mikrofonu (Gain)", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
     char gain_text[16];
     snprintf(gain_text, sizeof(gain_text), "%d%%", mic_gain_percent);
@@ -202,14 +201,14 @@ static void create_microphone_screen(void) {
     lv_obj_add_event_cb(slider, gain_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Card 3: Switches
-    switch_card(list, 306, "Filtr górnoprzepustowy (HPF)", "Tłumienie szumów otoczenia", &hpf_filter_enabled);
-    switch_card(list, 394, "Wycisz przy wygaszeniu", "Ochrona prywatności w trybie uśpienia", &mute_on_blank);
-    switch_card(list, 482, "Wycisz podczas mowy TTS", "Ochrona przed samowybudzaniem", &mute_on_tts);
+    switch_card(list, 286, "Filtr górnoprzepustowy (HPF)", "Tłumienie szumów otoczenia", &hpf_filter_enabled);
+    switch_card(list, 374, "Wycisz przy wygaszeniu", "Ochrona prywatności w trybie uśpienia", &mute_on_blank);
+    switch_card(list, 462, "Wycisz podczas mowy TTS", "Ochrona przed samowybudzaniem", &mute_on_tts);
 
     // Card 4: Test Mic
-    lv_obj_t * test_card = card(list, 20, 570, 440, 116);
+    lv_obj_t * test_card = card(list, 20, 550, 440, 116);
     label(test_card, "Sygnał wejściowy", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
-    test_status_label = label(test_card, "Test sygnału mikrofonu", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
+    test_status_label = label(test_card, "Test sygnału mikrofonu na żywo", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
 
     test_level_bar = lv_bar_create(test_card);
     lv_obj_set_size(test_level_bar, 408, 14);
@@ -219,7 +218,7 @@ static void create_microphone_screen(void) {
     lv_obj_set_style_bg_color(test_level_bar, OUTLINE_VARIANT, LV_PART_MAIN);
     lv_obj_set_style_bg_color(test_level_bar, PRIMARY, LV_PART_INDICATOR);
 
-    lv_obj_t * spacer = card(list, 0, 698, 1, 20);
+    lv_obj_t * spacer = card(list, 0, 678, 1, 20);
     surface(spacer, SURFACE, 0);
 }
 
