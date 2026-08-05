@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.7";
+const char * CURRENT_VERSION = "v1.9.9";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -1242,8 +1242,7 @@ bool perform_github_ota(lv_obj_t * mbox, lv_obj_t * bar) {
     // 2. Download the binary asset from public URL
     unlink("/tuya/data/ha_panel.tmp");
     printf("[OTA] Downloading new binary asset from %s...\n", download_url.c_str());
-    std::string cmd_download = "wget -q --header=\"User-Agent: Mozilla/5.0\" "
-                               "-O /tuya/data/ha_panel.tmp " + download_url + " &";
+    std::string cmd_download = "/tuya/data/curl -fskL --max-time 120 -o /tuya/data/ha_panel.tmp \"" + download_url + "\" &";
                                
     system(cmd_download.c_str());
 
@@ -1266,7 +1265,7 @@ bool perform_github_ota(lv_obj_t * mbox, lv_obj_t * bar) {
                 }
             }
 
-            if (st.st_size >= (off_t)expected_size && system("pidof wget >/dev/null") != 0) {
+            if (st.st_size >= (off_t)expected_size && system("pidof curl >/dev/null") != 0) {
                 if (bar) lv_bar_set_value(bar, 100, LV_ANIM_OFF);
                 if (mbox) lv_label_set_text(lv_msgbox_get_text(mbox), "Instalowanie i restart...");
                 lv_timer_handler();
