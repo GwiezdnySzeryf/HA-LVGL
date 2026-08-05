@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.4";
+const char * CURRENT_VERSION = "v1.9.5";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -3275,12 +3275,42 @@ static void apply_next_assist_pipeline_result(void) {
     if (result) apply_assist_pipeline_result(result);
 }
 
+static bool ensure_wake_word_assets(void) {
+    const char * worker_path = "/tuya/data/mww_worker";
+    const char * model_path = "/tuya/data/okay_nabu_v2.tflite";
+
+    bool worker_ok = (access(worker_path, X_OK) == 0);
+    bool model_ok = (access(model_path, R_OK) == 0);
+
+    if (worker_ok && model_ok) return true;
+
+    printf("[WakeWord] Assets missing on device. Downloading from GitHub Release...\n");
+
+    if (!worker_ok) {
+        std::string cmd = "/tuya/data/curl -fskL --max-time 30 -o /tuya/data/mww_worker "
+                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/v1.9.5/mww_worker\"";
+        if (system(cmd.c_str()) == 0) {
+            system("chmod 755 /tuya/data/mww_worker 2>/dev/null");
+        }
+    }
+
+    if (!model_ok) {
+        std::string cmd = "/tuya/data/curl -fskL --max-time 30 -o /tuya/data/okay_nabu_v2.tflite "
+                          "\"https://github.com/GwiezdnySzeryf/HA-LVGL/releases/download/v1.9.5/okay_nabu_v2.tflite\"";
+        system(cmd.c_str());
+    }
+
+    return (access(worker_path, X_OK) == 0) && (access(model_path, R_OK) == 0);
+}
+
 static bool start_wake_word_listener(void) {
     if (!mic_wake_enabled) return false;
     static const char * worker = "/tuya/data/mww_worker";
     static const char * model = "/tuya/data/okay_nabu_v2.tflite";
-    if (ha_url.empty() || ha_token.empty() || access(worker, X_OK) != 0 ||
-        access(model, R_OK) != 0) return false;
+    if (ha_url.empty() || ha_token.empty()) return false;
+    if (access(worker, X_OK) != 0 || access(model, R_OK) != 0) {
+        if (!ensure_wake_word_assets()) return false;
+    }
     const bool started = g_wake_word_listener.start(worker, model, []() {
         assist_wake_pending = true;
     });
