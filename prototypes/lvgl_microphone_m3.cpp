@@ -89,12 +89,13 @@ static void toggle_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
     bool * flag = static_cast<bool *>(lv_event_get_user_data(e));
     *flag = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    printf("[MicSwitch] Toggled state: %d\n", *flag);
 }
 
 static lv_obj_t * switch_card(lv_obj_t * parent, int y, const char * title, const char * subtitle, bool * value) {
     lv_obj_t * obj = card(parent, 20, y, 440, 76);
     label(obj, title, 16, 12, ON_SURFACE, &lv_font_montserrat_20_pl);
-    label(obj, subtitle, 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    label(obj, subtitle, 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
     lv_obj_t * sw = lv_switch_create(obj);
     style_switch(sw);
     lv_obj_set_pos(sw, 374, 24);
@@ -107,6 +108,7 @@ static void sensitivity_button_cb(lv_event_t * e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     int index = (int)(long)lv_event_get_user_data(e);
     wake_sensitivity_index = index;
+    printf("[MicSensitivity] Selected sensitivity index: %d\n", index);
     for (int i = 0; i < 3; ++i) {
         if (!sensitivity_buttons[i]) continue;
         bool sel = (i == index);
@@ -121,6 +123,7 @@ static void gain_slider_cb(lv_event_t * e) {
     char text[16];
     snprintf(text, sizeof(text), "%d%%", mic_gain_percent);
     lv_label_set_text(gain_slider_label, text);
+    printf("[MicGain] Slider changed: %d%%\n", mic_gain_percent);
 }
 
 static void create_microphone_screen(void) {
@@ -147,21 +150,18 @@ static void create_microphone_screen(void) {
     lv_obj_t * list = lv_obj_create(screen);
     lv_obj_set_size(list, 480, 408);
     lv_obj_set_pos(list, 0, 72);
-    surface(list, SURFACE, 0);
+    lv_obj_set_style_bg_color(list, SURFACE, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
-
-    // Hero Banner
-    lv_obj_t * hero = card(list, 20, 8, 440, 76);
-    surface(hero, PRIMARY_CONTAINER, 24);
-    label(hero, ICON_MIC, 20, 20, ON_PRIMARY_CONTAINER, &lv_font_control_icons_24);
-    label(hero, "Mikrofon i Wybudzanie", 60, 14, ON_PRIMARY_CONTAINER, &lv_font_montserrat_20_pl);
-    label(hero, "microWakeWord • ALC • Tłumienie szumów", 60, 44, ON_PRIMARY_CONTAINER, &lv_font_montserrat_14);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_OFF);
 
     // Card 1: Wake Word "Okay Nabu"
-    lv_obj_t * wake_card = card(list, 20, 96, 440, 148);
+    lv_obj_t * wake_card = card(list, 20, 8, 440, 148);
     label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
-    label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
     lv_obj_t * wake_sw = lv_switch_create(wake_card);
     style_switch(wake_sw);
     lv_obj_set_pos(wake_sw, 374, 20);
@@ -173,8 +173,8 @@ static void create_microphone_screen(void) {
     for (int i = 0; i < 3; ++i) {
         bool sel = (i == wake_sensitivity_index);
         sensitivity_buttons[i] = lv_btn_create(wake_card);
-        lv_obj_set_size(sensitivity_buttons[i], 128, 38);
-        lv_obj_set_pos(sensitivity_buttons[i], 16 + i * 136, 102);
+        lv_obj_set_size(sensitivity_buttons[i], 124, 38);
+        lv_obj_set_pos(sensitivity_buttons[i], 16 + i * 142, 102);
         surface(sensitivity_buttons[i], sel ? PRIMARY_CONTAINER : SURFACE_HIGH, 19);
         lv_obj_set_style_border_color(sensitivity_buttons[i], OUTLINE_VARIANT, LV_PART_MAIN);
         lv_obj_set_style_border_width(sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
@@ -184,7 +184,7 @@ static void create_microphone_screen(void) {
     }
 
     // Card 2: Mic Gain / ALC
-    lv_obj_t * gain_card = card(list, 20, 256, 440, 126);
+    lv_obj_t * gain_card = card(list, 20, 168, 440, 126);
     label(gain_card, "Czułość mikrofonu (Gain)", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
     char gain_text[16];
     snprintf(gain_text, sizeof(gain_text), "%d%%", mic_gain_percent);
@@ -202,14 +202,14 @@ static void create_microphone_screen(void) {
     lv_obj_add_event_cb(slider, gain_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Card 3: Switches
-    switch_card(list, 394, "Filtr górnoprzepustowy (HPF)", "Tłumienie szumów otoczenia", &hpf_filter_enabled);
-    switch_card(list, 482, "Wycisz przy wygaszonym ekranie", "Ochrona prywatności w trybie uśpienia", &mute_on_blank);
-    switch_card(list, 570, "Wycisz podczas mowy TTS", "Ochrona przed samowybudzaniem", &mute_on_tts);
+    switch_card(list, 306, "Filtr górnoprzepustowy (HPF)", "Tłumienie szumów otoczenia", &hpf_filter_enabled);
+    switch_card(list, 394, "Wycisz przy wygaszeniu", "Ochrona prywatności w trybie uśpienia", &mute_on_blank);
+    switch_card(list, 482, "Wycisz podczas mowy TTS", "Ochrona przed samowybudzaniem", &mute_on_tts);
 
     // Card 4: Test Mic
-    lv_obj_t * test_card = card(list, 20, 658, 440, 116);
-    label(test_card, "Test mikrofonu", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
-    test_status_label = label(test_card, "Sygnał wejściowy", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    lv_obj_t * test_card = card(list, 20, 570, 440, 116);
+    label(test_card, "Sygnał wejściowy", 16, 14, ON_SURFACE, &lv_font_montserrat_20_pl);
+    test_status_label = label(test_card, "Test sygnału mikrofonu", 16, 44, ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
 
     test_level_bar = lv_bar_create(test_card);
     lv_obj_set_size(test_level_bar, 408, 14);
@@ -219,7 +219,7 @@ static void create_microphone_screen(void) {
     lv_obj_set_style_bg_color(test_level_bar, OUTLINE_VARIANT, LV_PART_MAIN);
     lv_obj_set_style_bg_color(test_level_bar, PRIMARY, LV_PART_INDICATOR);
 
-    lv_obj_t * spacer = card(list, 0, 786, 1, 20);
+    lv_obj_t * spacer = card(list, 0, 698, 1, 20);
     surface(spacer, SURFACE, 0);
 }
 

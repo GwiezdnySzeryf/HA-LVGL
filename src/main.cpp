@@ -105,7 +105,7 @@ std::string ha_entity_2_name = "WENTYLATOR";
 bool onboarding_active = false;
 
 // Version of current binary
-const char * CURRENT_VERSION = "v1.9.2";
+const char * CURRENT_VERSION = "v1.9.3";
 
 static lv_obj_t * control_center = NULL;
 static lv_obj_t * brightness_value_label = NULL;
@@ -2270,12 +2270,18 @@ static void settings_m3_hero(lv_obj_t * parent, const char * title, const char *
     lv_obj_t * hero = settings_m3_card(parent, 20, 8, 440, 76);
     lv_obj_set_style_bg_color(hero, M3_PRIMARY_CONTAINER, LV_PART_MAIN);
 
+    bool has_sub = (subtitle && subtitle[0] != '\0');
+    int dot_y = has_sub ? 22 : 34;
+    int title_y = has_sub ? 10 : 23;
+
     lv_obj_t * dot = lv_obj_create(hero);
     lv_obj_set_size(dot, 8, 8);
-    lv_obj_set_pos(dot, 16, 22);
+    lv_obj_set_pos(dot, 16, dot_y);
     settings_m3_surface(dot, active ? M3_SUCCESS : M3_OUTLINE, 4);
-    settings_m3_label(hero, title, 34, 10, M3_ON_PRIMARY_CONTAINER, &lv_font_montserrat_20_pl);
-    settings_m3_label(hero, subtitle, 16, 44, lv_color_hex(0x8BD7DF), &lv_font_montserrat_14);
+    settings_m3_label(hero, title, 34, title_y, M3_ON_PRIMARY_CONTAINER, &lv_font_montserrat_20_pl);
+    if (has_sub) {
+        settings_m3_label(hero, subtitle, 16, 44, lv_color_hex(0x8BD7DF), &lv_font_montserrat_14_pl);
+    }
 
     lv_obj_t * badge = lv_obj_create(hero);
     lv_obj_set_size(badge, 44, 44);
@@ -3032,12 +3038,11 @@ static void create_microphone_screen(void) {
 
     lv_obj_t * list = NULL;
     microphone_screen = create_subscreen_base("Mikrofon", microphone_back_event_cb, &list);
-    settings_m3_hero(list, "Mikrofon i Wybudzanie", "microWakeWord • ALC • Tłumienie szumów", ICON_MIC, true);
 
     // Card 1: Wake Word "Okay Nabu"
-    lv_obj_t * wake_card = settings_m3_card(list, 20, 96, 440, 148);
+    lv_obj_t * wake_card = settings_m3_card(list, 20, 8, 440, 148);
     settings_m3_label(wake_card, "Wybudzanie \"Okay Nabu\"", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
-    settings_m3_label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    settings_m3_label(wake_card, "Lokalna detekcja frazy kluczowej", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
     lv_obj_t * wake_sw = lv_switch_create(wake_card);
     settings_m3_style_switch(wake_sw);
     lv_obj_set_pos(wake_sw, 374, 20);
@@ -3049,8 +3054,8 @@ static void create_microphone_screen(void) {
     for (int i = 0; i < 3; ++i) {
         bool sel = (i == mic_wake_sensitivity);
         mic_sensitivity_buttons[i] = lv_btn_create(wake_card);
-        lv_obj_set_size(mic_sensitivity_buttons[i], 128, 38);
-        lv_obj_set_pos(mic_sensitivity_buttons[i], 16 + i * 136, 102);
+        lv_obj_set_size(mic_sensitivity_buttons[i], 124, 38);
+        lv_obj_set_pos(mic_sensitivity_buttons[i], 16 + i * 142, 102);
         settings_m3_surface(mic_sensitivity_buttons[i], sel ? M3_PRIMARY_CONTAINER : M3_SURFACE_HIGH, 20);
         lv_obj_set_style_border_color(mic_sensitivity_buttons[i], M3_OUTLINE_VARIANT, LV_PART_MAIN);
         lv_obj_set_style_border_width(mic_sensitivity_buttons[i], sel ? 0 : 1, LV_PART_MAIN);
@@ -3060,7 +3065,7 @@ static void create_microphone_screen(void) {
     }
 
     // Card 2: Mic Gain
-    lv_obj_t * gain_card = settings_m3_card(list, 20, 256, 440, 126);
+    lv_obj_t * gain_card = settings_m3_card(list, 20, 168, 440, 126);
     settings_m3_label(gain_card, "Czułość mikrofonu (Gain)", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
     char gain_text[16];
     snprintf(gain_text, sizeof(gain_text), "%d%%", mic_gain_percent);
@@ -3079,14 +3084,14 @@ static void create_microphone_screen(void) {
     lv_obj_add_event_cb(mic_gain_slider, mic_gain_event_cb, LV_EVENT_RELEASED, NULL);
 
     // Card 3: Switches
-    create_sound_switch_card(list, 394, "Filtr górnoprzepustowy (HPF)", mic_hpf_enabled, 1);
-    create_sound_switch_card(list, 482, "Wycisz przy wygaszeniu", mic_mute_on_blank, 2);
-    create_sound_switch_card(list, 570, "Wycisz podczas mowy TTS", mic_mute_on_tts, 3);
+    create_sound_switch_card(list, 306, "Filtr górnoprzepustowy (HPF)", mic_hpf_enabled, 1);
+    create_sound_switch_card(list, 394, "Wycisz przy wygaszeniu", mic_mute_on_blank, 2);
+    create_sound_switch_card(list, 482, "Wycisz podczas mowy TTS", mic_mute_on_tts, 3);
 
     // Card 4: Signal Test
-    lv_obj_t * test_card = settings_m3_card(list, 20, 658, 440, 116);
+    lv_obj_t * test_card = settings_m3_card(list, 20, 570, 440, 116);
     settings_m3_label(test_card, "Sygnał wejściowy", 16, 14, M3_ON_SURFACE, &lv_font_montserrat_20_pl);
-    mic_test_label = settings_m3_label(test_card, "Test sygnału mikrofonu", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14);
+    mic_test_label = settings_m3_label(test_card, "Test sygnału mikrofonu", 16, 44, M3_ON_SURFACE_VARIANT, &lv_font_montserrat_14_pl);
 
     mic_test_bar = lv_bar_create(test_card);
     lv_obj_set_size(mic_test_bar, 408, 14);
@@ -3100,7 +3105,7 @@ static void create_microphone_screen(void) {
 
     lv_obj_t * spacer = lv_obj_create(list);
     lv_obj_set_size(spacer, 1, 20);
-    lv_obj_set_pos(spacer, 0, 786);
+    lv_obj_set_pos(spacer, 0, 698);
     settings_m3_surface(spacer, lv_color_make(0x11, 0x13, 0x18), 0);
 }
 
